@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+venv/
+.env.*
+
+# Editor
+.vscode/
+.idea/
+
+# Models and large files
+*.pt
+*.onnx
+*.engine
+calibration.cache
+cv-advanced-assessment/models/
+
+# OS
+.DS_Store
+Thumbs.db
