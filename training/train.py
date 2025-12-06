@@ -57,7 +57,7 @@ def main():
         multi_scale=True,  
         cos_lr=True,        
         amp=True,           
-        ema=True,          
+         
 
         # YOLO built-in augmentations
         mosaic=1.0,         

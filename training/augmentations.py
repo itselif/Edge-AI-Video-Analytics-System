@@ -4,13 +4,13 @@ import albumentations as A
 
 
 def get_train_augmentations(img_size: int = 640):
+    size = (img_size, img_size)
 
     return [
         # 1) Random crop / scale
         A.RandomResizedCrop(
-            height=img_size,
-            width=img_size,
-            scale=(0.8, 1.0), 
+            size=size,             
+            scale=(0.8, 1.0),
             ratio=(0.75, 1.33),
             p=0.5,
         ),
@@ -25,7 +25,7 @@ def get_train_augmentations(img_size: int = 640):
             p=0.3,
         ),
 
-        # 3) Color augments
+        # 3) Color jitter
         A.OneOf(
             [
                 A.RandomBrightnessContrast(
@@ -56,14 +56,14 @@ def get_train_augmentations(img_size: int = 640):
             p=0.2,
         ),
 
-        # 5) CutOut
+        # 5) CutOut (CoarseDropout)
         A.CoarseDropout(
             max_holes=8,
-            max_height=0.2 * img_size,
-            max_width=0.2 * img_size,
+            max_height=int(0.2 * img_size),
+            max_width=int(0.2 * img_size),
             min_holes=1,
-            min_height=0.05 * img_size,
-            min_width=0.05 * img_size,
+            min_height=int(0.05 * img_size),
+            min_width=int(0.05 * img_size),
             fill_value=0,
             p=0.4,
         ),
