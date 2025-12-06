@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import argparse
 
-from training.augmentations import get_train_augmentations  # <- Albumentations pipeline
+from augmentations import get_train_augmentations  # <- Albumentations pipeline
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_CONFIG = ROOT / "training" / "dataset.yaml"
