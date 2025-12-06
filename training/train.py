@@ -1,89 +1,78 @@
 # training/train.py
 
-from ultralytics import YOLO
-from ultralytics.utils import LOGGER
+import argparse
 from pathlib import Path
 import shutil
-import argparse
 
-from augmentations import get_train_augmentations  # <- Albumentations pipeline
+import torch
+from ultralytics import YOLO
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_CONFIG = ROOT / "training" / "dataset.yaml"
-LOG_DIR = ROOT / "training" / "logs"
-MODELS_DIR = ROOT / "models"
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--batch", type=int, default=16)
-    parser.add_argument("--device", type=str, default="0")  # Colab GPU: "0"
-    parser.add_argument("--model", type=str, default="yolo11n.pt")
-    return parser.parse_args()
+from augmentations import get_train_augmentations
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--imgsz", type=int, default=640)
+    args = parser.parse_args()
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    # Proje kökü: .../Edge-AI-Video-Analytics-System
+    root = Path(__file__).resolve().parents[1]
 
-    model = YOLO(args.model)
+    data_path = root / "training" / "dataset.yaml"
+    logs_dir = root / "training" / "logs"
+    models_dir = root / "models"
 
-    # Albumentations augmentations
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Using dataset config: {data_path}")
+    print(f"Logs dir         : {logs_dir}")
+    print(f"Models dir       : {models_dir}")
+
+    # Device seçimi: GPU varsa 0, yoksa CPU
+    device = "0" if torch.cuda.is_available() else "cpu"
+    print(f"[INFO] Using device: {device}")
+
+    # YOLO11n modelini yükle
+    model = YOLO("yolo11n.pt")  # weights otomatik indirilecek
+
+    # Albumentations pipeline
     custom_augs = get_train_augmentations(img_size=args.imgsz)
 
-    run_name = "coco_5cls_yolo11n"
-
-    LOGGER.info(f"Using dataset config: {DATA_CONFIG}")
-    LOGGER.info(f"Logs dir         : {LOG_DIR}")
-    LOGGER.info(f"Models dir       : {MODELS_DIR}")
-
-    #Train the model
+    # Eğitim
     results = model.train(
-        data=str(DATA_CONFIG),
+        data=str(data_path),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,
-        device=args.device,
-
-        project=str(LOG_DIR),
-        name=run_name,
+        project=str(logs_dir),
+        name="coco_5cls_yolo11n",
         exist_ok=True,
-
-
-        multi_scale=True,  
-        cos_lr=True,        
-        amp=True,           
-         
-
-        # YOLO built-in augmentations
-        mosaic=1.0,         
-        mixup=0.2,          
-        close_mosaic=10,    # Close the mosaic last 10 epoch
-        augmentations=custom_augs,
-
-        # Log & plotting
+        multi_scale=True,   # Multi-scale training
+        cos_lr=True,        # Cosine LR schedule
+        amp=True,           # Mixed precision
+        mosaic=1.0,         # Mosaic açık
+        mixup=0.2,          # MixUp açık
+        close_mosaic=10,    # Son 10 epoch'ta mosaic kapanıyor
+        augmentations=custom_augs,  # Albumentations pipeline
         val=True,
-        plots=True,         # Loss curves, mAP curves, confusion matrix etc.
-        save=True,
+        plots=True,         # loss/mAP grafiklerini üret
+        save=True,          # weights/best.pt ve last.pt
+        device=device,      # <--- KRİTİK KISIM
     )
 
-    # Copy the best model as models/latest.pt
-    run_dir = LOG_DIR / run_name
-    best_ckpt = run_dir / "weights" / "best.pt"
-    last_ckpt = run_dir / "weights" / "last.pt"
+    # En iyi modeli models/latest.pt olarak kopyala
+    run_dir = Path(results.save_dir)  # training/logs/coco_5cls_yolo11n
+    best_pt = run_dir / "weights" / "best.pt"
+    latest_pt = models_dir / "latest.pt"
 
-    src = best_ckpt if best_ckpt.exists() else last_ckpt
-    dst = MODELS_DIR / "latest.pt"
-
-    if src.exists():
-        shutil.copy2(src, dst)
-        LOGGER.info(f"[INFO] Saved best model to {dst}")
+    if best_pt.exists():
+        shutil.copy2(best_pt, latest_pt)
+        print(f"[INFO] Saved best model to {latest_pt}")
     else:
-        LOGGER.warning("[WARN] No best/last checkpoint found!")
+        print("[WARN] best.pt not found, latest.pt not updated")
 
 
 if __name__ == "__main__":
