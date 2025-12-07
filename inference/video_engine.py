@@ -2,21 +2,34 @@
 
 from __future__ import annotations
 
-import threading
-import time
-from queue import Queue, Empty
-from typing import Optional, List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional
 
 import cv2
 import numpy as np
 
-from inference.detector import Detector, Detection
-from inference.tracker import MultiObjectTracker, Track
-from inference.fusion import fuse_detections_and_tracks, FusedObject
-from inference.utils import TrackViz, draw_tracks
+from .detector import Detector, Detection
+from .tracker import MultiObjectTracker, Track
+from .fusion import FusedObject, fuse_detections_and_tracks
+
+
+@dataclass
+class VideoEngineConfig:
+    detect_every_n: int = 5
+    draw_thickness: int = 2
+    font_scale: float = 0.5
+    score_thres: float = 0.25
 
 
 class VideoEngine:
+    """
+    Real-time pipeline:
+
+        frame -> Detector (periodik) -> Tracker -> Fusion -> draw (dedektör kutuları) -> annotated frame
+
+    Çizim tarafında sadece dedektörün ürettiği bbox'lar kullanılıyor.
+    Tracker + fusion, ileride metrikler/testler için yine çalışıyor.
+    """
 
     def __init__(
         self,
@@ -30,165 +43,184 @@ class VideoEngine:
         self.detector = detector
         self.tracker = tracker
         self.class_names = class_names or []
-        self.detect_every_n = max(1, detect_every_n)
+        self.cfg = VideoEngineConfig(detect_every_n=detect_every_n)
         self.display = display
         self.save_path = save_path
 
-        self._frame_queue: "Queue[Tuple[int, np.ndarray]]" = Queue(maxsize=10)
-        self._result_queue: "Queue[Tuple[int, np.ndarray]]" = Queue(maxsize=10)
+        self._writer = None  # run() ile kullanırken VideoWriter
+        self._last_detections: List[Detection] = []  # detect_every_n için cache
 
-        self._stop_flag = threading.Event()
-        self._worker_thread: Optional[threading.Thread] = None
-
-    # ------------- public API -------------
-
-    def run(self, source=0):
+    # ------------------------------------------------------------------
+    # Ana API: tek frame işle
+    # ------------------------------------------------------------------
+    def process_frame(self, frame_bgr: np.ndarray, frame_idx: int):
         """
-        Run full pipeline on webcam (source=0) or video file path.
+        Tek bir BGR frame alır, detector + tracker + fusion uygular,
+        annotated frame ve fused object listesini döner.
+
+        Çizim: sadece dedektör kutuları (tracking ID yerine sınıf + skor).
         """
-        cap = cv2.VideoCapture(source)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open video source: {source}")
+        if frame_bgr is None:
+            raise ValueError("frame_bgr is None")
 
-        writer = None
-        if self.save_path is not None:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0:
-                fps = 30
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            writer = cv2.VideoWriter(self.save_path, fourcc, fps, (w, h))
-
-        # start worker thread (inference pipeline)
-        self._worker_thread = threading.Thread(target=self._inference_worker, daemon=True)
-        self._worker_thread.start()
-
-        frame_idx = 0
-        prev_time = time.perf_counter()
-        try:
-            while not self._stop_flag.is_set():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                # push frame into queue (non-blocking)
-                try:
-                    self._frame_queue.put_nowait((frame_idx, frame.copy()))
-                except Exception:
-                    # queue full, drop frame
-                    pass
-
-                # try to get processed result
-                try:
-                    idx_out, frame_out = self._result_queue.get_nowait()
-                except Empty:
-                    frame_out = frame
-
-                # FPS measure (rough)
-                now = time.perf_counter()
-                dt = now - prev_time
-                prev_time = now
-                fps = 1.0 / dt if dt > 0 else 0.0
-                cv2.putText(
-                    frame_out,
-                    f"FPS: {fps:.1f}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 255, 0),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                if writer is not None:
-                    writer.write(frame_out)
-
-                if self.display:
-                    cv2.imshow("Edge AI Video Engine", frame_out)
-                    if cv2.waitKey(1) & 0xFF == 27:  # ESC
-                        break
-
-                frame_idx += 1
-
-        finally:
-            self._stop_flag.set()
-            cap.release()
-            if writer is not None:
-                writer.release()
-            if self.display:
-                cv2.destroyAllWindows()
-            if self._worker_thread is not None:
-                self._worker_thread.join()
-
-    def process_frame(
-        self,
-        frame_bgr: np.ndarray,
-        frame_idx: int,
-    ) -> Tuple[np.ndarray, List[FusedObject]]:
-        """
-        Single-threaded, deterministic processing for unit tests / offline use.
-        Pipeline:
-            - If frame_idx % detect_every_n == 0 → run detector + tracker.update_with_detections
-            - Else → tracker.track_only
-            - Then fuse detections and tracks.
-        Returns annotated frame and fused objects.
-        """
-        run_detector = (frame_idx % self.detect_every_n == 0)
+        run_detector = (frame_idx % self.cfg.detect_every_n == 0)
 
         detections: List[Detection] = []
-        if run_detector:
+        if run_detector or not self._last_detections:
+            # dedektörü çalıştır
             detections = self.detector(frame_bgr)
-
-        if run_detector:
-            tracks: List[Track] = self.tracker.update_with_detections(frame_bgr, detections)
+            self._last_detections = detections
+            # tracker'ı dedektörle güncelle
+            tracks: List[Track] = self.tracker.update_with_detections(
+                frame_bgr, detections
+            )
         else:
+            # aradaki framelerde sadece tracker çalışsın
             tracks = self.tracker.track_only(frame_bgr)
+            detections = self._last_detections
 
-        fused = fuse_detections_and_tracks(detections, tracks, iou_thres=self.tracker.drift_iou_thres)
+        # Drift detection / fusion (ileride metrik/test için kullanılır)
+        drift_iou = getattr(self.tracker, "drift_iou_thres", 0.5)
+        fused: List[FusedObject] = fuse_detections_and_tracks(
+            detections, tracks, iou_thres=drift_iou
+        )
 
-        # convert fused to TrackViz for drawing
-        track_viz_list: List[TrackViz] = []
-        for fo in fused:
-            if fo.track_id is None:
-                # still draw but ID=-1
-                track_viz_list.append(
-                    TrackViz(
-                        track_id=-1,
-                        bbox=(fo.x1, fo.y1, fo.x2, fo.y2),
-                        score=fo.score,
-                        cls=fo.cls,
-                    )
-                )
-            else:
-                track_viz_list.append(
-                    TrackViz(
-                        track_id=fo.track_id,
-                        bbox=(fo.x1, fo.y1, fo.x2, fo.y2),
-                        score=fo.score,
-                        cls=fo.cls,
-                    )
-                )
-
-        annotated = draw_tracks(frame_bgr, track_viz_list, class_names=self.class_names)
+        # EKRANA ÇİZİLEN: sadece dedektör kutuları
+        annotated = self._draw_detections(frame_bgr, detections)
         return annotated, fused
 
-    # ------------- worker thread -------------
+    # ------------------------------------------------------------------
+    # Opsiyonel: doğrudan video path vererek çalıştırma
+    # ------------------------------------------------------------------
+    def run(self, video_path: str, max_frames: Optional[int] = None):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Video açılamadı: {video_path}")
 
-    def _inference_worker(self):
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if self.save_path is not None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(self.save_path, fourcc, fps, (w, h))
+
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if max_frames is not None and frame_idx >= max_frames:
+                break
+
+            annotated, fused = self.process_frame(frame, frame_idx)
+
+            if self._writer is not None:
+                self._writer.write(annotated)
+
+            if self.display:
+                cv2.imshow("VideoEngine", annotated)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            frame_idx += 1
+
+        cap.release()
+        if self._writer is not None:
+            self._writer.release()
+        if self.display:
+            cv2.destroyAllWindows()
+
+    # ------------------------------------------------------------------
+    # Çizim: dedektör kutuları
+    # ------------------------------------------------------------------
+    def _draw_detections(
+        self, frame_bgr: np.ndarray, detections: List[Detection]
+    ) -> np.ndarray:
         """
-        Thread A: consumes frames, runs full pipeline, produces annotated frames.
+        Sadece dedektörün ürettiği bbox'ları çizer.
         """
-        while not self._stop_flag.is_set():
-            try:
-                frame_idx, frame_bgr = self._frame_queue.get(timeout=0.1)
-            except Empty:
+        out = frame_bgr.copy()
+        h, w = out.shape[:2]
+
+        for det in detections:
+            x1, y1, x2, y2 = float(det.x1), float(det.y1), float(det.x2), float(det.y2)
+
+            # Eğer 0-1 aralığındaysa normalize kabul edip piksele çevir
+            if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
+                x1 *= w
+                x2 *= w
+                y1 *= h
+                y2 *= h
+
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+            # frame içine clamp
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h - 1))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+            if (x2 - x1) < 5 or (y2 - y1) < 5:
                 continue
 
-            annotated, fused = self.process_frame(frame_bgr, frame_idx)
-            # fused currently sadece log/analiz için kullanılabilir (burada kuyruğa koymuyoruz)
-            try:
-                self._result_queue.put_nowait((frame_idx, annotated))
-            except Exception:
-                # result queue full, drop
-                pass
+            cls_name = self._get_class_name(det.cls)
+            score = float(det.score)
+
+            # renk: class id'ye göre sabit
+            color = self._color_from_id(int(det.cls))
+
+            # bbox
+            cv2.rectangle(
+                out,
+                (x1, y1),
+                (x2, y2),
+                color,
+                thickness=3,
+            )
+
+            label = f"{cls_name} {score:.2f}"
+
+            ((tw, th), _) = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, self.cfg.font_scale, 1
+            )
+            cy1 = max(0, y1 - th - 4)
+            cv2.rectangle(
+                out,
+                (x1, cy1),
+                (x1 + tw + 4, cy1 + th + 4),
+                color,
+                thickness=-1,
+            )
+            cv2.putText(
+                out,
+                label,
+                (x1 + 2, cy1 + th + 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                self.cfg.font_scale,
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Yardımcılar
+    # ------------------------------------------------------------------
+    def _get_class_name(self, cls_id: int) -> str:
+        if 0 <= cls_id < len(self.class_names):
+            return self.class_names[cls_id]
+        return str(cls_id)
+
+    @staticmethod
+    def _color_from_id(idx: int):
+        """
+        ID'den deterministik BGR renk üret.
+        """
+        r = (37 * idx) % 255
+        g = (17 * idx) % 255
+        b = (29 * idx) % 255
+        return int(b), int(g), int(r)
