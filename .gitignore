@@ -18,6 +18,23 @@ venv/
 calibration.cache
 cv-advanced-assessment/models/
 
+
+!models/latest.pt
+
+# Datasets (raw + processed)
+data/coco2017/
+datasets/
+!datasets/README.md
+
+# YOLO / training outputs
+runs/
+training/logs/*/weights/          # last.pt, best.pt vs. büyük dosyalar
+training/logs/*/events.out.tfevents.*  # TensorBoard event dosyaları çok büyük
+
+
+# Jupyter
+.ipynb_checkpoints/
+
 # OS
 .DS_Store
 Thumbs.db
