@@ -11,7 +11,7 @@ import pynvml
 import torch
 from ultralytics import YOLO
 
-# TensorRT / PyCUDA opsiyonel: yoksa sadece PyTorch + ONNX benchmark çalışsın
+# TensorRT / PyCUDA isteğe bağlı; yoksa sadece PyTorch ve ONNX ölçülür
 try:
     import tensorrt as trt
     import pycuda.autoinit  # noqa: F401
@@ -57,7 +57,7 @@ def preprocess_image(img, imgsz: int):
 
 
 class TrtRunner:
-    """Simple wrapper around a TensorRT engine for benchmarking."""
+    """Benchmark için TensorRT engine sarmalayıcısı."""
 
     def __init__(self, engine_path: Path):
         if not HAS_TRT:
@@ -127,7 +127,7 @@ def init_gpu_monitor():
 
 def get_gpu_utilization(handle):
     util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-    return util.gpu  # percentage
+    return util.gpu  # yüzde
 
 
 def summarize(name: str, times_ms: list):
@@ -150,7 +150,6 @@ def benchmark_pytorch(pt_path: Path, imgs, imgsz: int, iters: int, warmup: int):
 
     pre_times, infer_times, post_times, gpu_utils = [], [], [], []
 
-    # warmup
     for _ in range(warmup):
         _, img = imgs[_ % len(imgs)]
         x = preprocess_image(img, imgsz)
@@ -158,7 +157,6 @@ def benchmark_pytorch(pt_path: Path, imgs, imgsz: int, iters: int, warmup: int):
         with torch.no_grad():
             _ = model(x)
 
-    # benchmark
     for i in range(iters):
         _, img = imgs[i % len(imgs)]
 
@@ -207,7 +205,6 @@ def benchmark_onnx(onnx_path: Path, imgs, imgsz: int, iters: int, warmup: int):
 
     pre_times, infer_times, post_times, gpu_utils = [], [], [], []
 
-    # warmup
     for _ in range(warmup):
         _, img = imgs[_ % len(imgs)]
         x = preprocess_image(img, imgsz)
@@ -260,7 +257,6 @@ def benchmark_trt(engine_path: Path, imgs, imgsz: int, iters: int, warmup: int, 
 
     pre_times, infer_times, post_times, gpu_utils = [], [], [], []
 
-    # warmup
     for _ in range(warmup):
         _, img = imgs[_ % len(imgs)]
         x = preprocess_image(img, imgsz)
@@ -280,7 +276,7 @@ def benchmark_trt(engine_path: Path, imgs, imgsz: int, iters: int, warmup: int, 
         inf_t = (time.perf_counter() - t1) * 1000
 
         t2 = time.perf_counter()
-        _ = out  # dummy postprocess
+        _ = out
         post_t = (time.perf_counter() - t2) * 1000
 
         pre_times.append(pre_t)
@@ -325,47 +321,57 @@ if __name__ == "__main__":
 
     results = []
 
-    # PyTorch backend
     results.append(
         benchmark_pytorch(
             Path(args.pt), imgs, imgsz=args.imgsz, iters=args.iters, warmup=args.warmup
         )
     )
 
-    # ONNX Runtime backend
     results.append(
         benchmark_onnx(
             Path(args.onnx), imgs, imgsz=args.imgsz, iters=args.iters, warmup=args.warmup
         )
     )
 
-    # TensorRT FP16 backend (opsiyonel)
     fp16_path = Path(args.fp16_engine)
     if fp16_path.exists() and HAS_TRT:
         try:
             results.append(
                 benchmark_trt(
-                    fp16_path, imgs, imgsz=args.imgsz, iters=args.iters, warmup=args.warmup, name="tensorrt_fp16"
+                    fp16_path,
+                    imgs,
+                    imgsz=args.imgsz,
+                    iters=args.iters,
+                    warmup=args.warmup,
+                    name="tensorrt_fp16",
                 )
             )
         except Exception as e:
             print(f"[WARN] Skipping TensorRT FP16 benchmark due to error: {e}")
     else:
-        print(f"[WARN] FP16 engine not found at {fp16_path} or TensorRT unavailable, skipping TensorRT FP16 benchmark")
+        print(
+            f"[WARN] FP16 engine not found at {fp16_path} or TensorRT unavailable, skipping TensorRT FP16 benchmark"
+        )
 
-    # TensorRT INT8 backend (opsiyonel)
     int8_path = Path(args.int8_engine)
     if int8_path.exists() and HAS_TRT:
         try:
             results.append(
                 benchmark_trt(
-                    int8_path, imgs, imgsz=args.imgsz, iters=args.iters, warmup=args.warmup, name="tensorrt_int8"
+                    int8_path,
+                    imgs,
+                    imgsz=args.imgsz,
+                    iters=args.iters,
+                    warmup=args.warmup,
+                    name="tensorrt_int8",
                 )
             )
         except Exception as e:
             print(f"[WARN] Skipping TensorRT INT8 benchmark due to error: {e}")
     else:
-        print(f"[WARN] INT8 engine not found at {int8_path} or TensorRT unavailable, skipping TensorRT INT8 benchmark")
+        print(
+            f"[WARN] INT8 engine not found at {int8_path} or TensorRT unavailable, skipping TensorRT INT8 benchmark"
+        )
 
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w") as f:

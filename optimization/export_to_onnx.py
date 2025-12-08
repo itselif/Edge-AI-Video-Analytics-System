@@ -1,11 +1,12 @@
-# optimization/export_to_onnx.py
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 import numpy as np
-import torch
 import onnx
 import onnxruntime as ort
+import torch
 from ultralytics import YOLO
 
 
@@ -20,8 +21,8 @@ def export_to_onnx(
     imgsz: int = 640,
     opset: int = 13,
     device: str = "cuda:0",
-):
-    model = YOLO(str(pt_path))  # loads trained YOLO11n
+) -> None:
+    model = YOLO(str(pt_path))
 
     export_args = dict(
         format="onnx",
@@ -30,7 +31,7 @@ def export_to_onnx(
         dynamic=True,
         simplify=True,
         device=device,
-        half=False,   # FP32 ONNX
+        half=False,
         verbose=False,
     )
 
@@ -40,8 +41,8 @@ def export_to_onnx(
         export_args["optimize"] = True
 
     onnx_file = model.export(**export_args)
-
     onnx_file = Path(onnx_file)
+
     if onnx_file != onnx_path:
         onnx_path.write_bytes(onnx_file.read_bytes())
         onnx_file.unlink()
@@ -49,8 +50,7 @@ def export_to_onnx(
     onnx_model = onnx.load(str(onnx_path))
     onnx.checker.check_model(onnx_model)
 
-    print(f"[OK] Exported ONNX to {onnx_path}")
-
+    print(f"[OK] Exported ONNX model to {onnx_path}")
 
 
 def validate_onnx_vs_pytorch(
@@ -58,21 +58,18 @@ def validate_onnx_vs_pytorch(
     onnx_path: Path,
     imgsz: int = 640,
     device: str = "cuda:0",
-):
+) -> None:
     device_torch = torch.device(device if torch.cuda.is_available() else "cpu")
 
     model = YOLO(str(pt_path))
     model.to(device_torch)
     model.eval()
 
-    # Random input
     x = torch.rand(1, 3, imgsz, imgsz, device=device_torch)
 
     with torch.no_grad():
-        # Ultralytics internal model forward
         pt_raw = model.model(x)[0].detach().cpu().numpy()
 
-    # ONNX Runtime session
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     sess = ort.InferenceSession(str(onnx_path), providers=providers)
     input_name = sess.get_inputs()[0].name
@@ -86,7 +83,7 @@ def validate_onnx_vs_pytorch(
         max_diff = np.abs(pt_raw - onnx_raw).max()
         print(f"[INFO] ONNX vs PyTorch mean diff: {diff:.6f}, max diff: {max_diff:.6f}")
 
-    print("[OK] ONNX validation run finished.")
+    print("[OK] ONNX validation finished.")
 
 
 def parse_args():
@@ -104,5 +101,17 @@ if __name__ == "__main__":
     pt_path = Path(args.pt)
     onnx_path = Path(args.onnx)
 
-    export_to_onnx(pt_path, onnx_path, imgsz=args.imgsz, opset=args.opset, device=args.device)
-    validate_onnx_vs_pytorch(pt_path, onnx_path, imgsz=args.imgsz, device=args.device)
+    export_to_onnx(
+        pt_path=pt_path,
+        onnx_path=onnx_path,
+        imgsz=args.imgsz,
+        opset=args.opset,
+        device=args.device,
+    )
+
+    validate_onnx_vs_pytorch(
+        pt_path=pt_path,
+        onnx_path=onnx_path,
+        imgsz=args.imgsz,
+        device=args.device,
+    )

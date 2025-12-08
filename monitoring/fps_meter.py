@@ -5,17 +5,6 @@ from typing import Deque
 
 
 class FPSMeter:
-    """
-    Simple FPS meter with a sliding window.
-
-    Usage:
-        fps_meter = FPSMeter(window_size=100)
-        while True:
-            ...  # process frame
-            fps_meter.tick()
-            print(fps_meter.fps)
-    """
-
     def __init__(self, window_size: int = 100) -> None:
         self.window_size = window_size
         self._timestamps: Deque[float] = deque(maxlen=window_size)

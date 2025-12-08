@@ -1,4 +1,4 @@
-# optimization/calibrate_int8.py
+from __future__ import annotations
 
 import argparse
 from glob import glob
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pycuda.autoinit  # noqa: F401  # CUDA context
+import pycuda.autoinit  # CUDA context
 import pycuda.driver as cuda
 import tensorrt as trt
 
@@ -18,8 +18,8 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 class EntropyCalibrator(trt.IInt8EntropyCalibrator2):
     """
-    Entropy-based INT8 calibrator for TensorRT.
-    Uses simple image folder as calibration dataset.
+    TensorRT için entropi tabanlı INT8 kalibratör.
+    Basit bir görüntü klasörünü kalibrasyon datası olarak kullanır.
     """
 
     def __init__(
@@ -44,17 +44,17 @@ class EntropyCalibrator(trt.IInt8EntropyCalibrator2):
         )
         self.device_input = cuda.mem_alloc(self.buf_size)
 
-    def preprocess_image(self, path):
+    def preprocess_image(self, path: str) -> np.ndarray:
         img = cv2.imread(path)
         if img is None:
-            raise RuntimeError(f"Failed to read calibration image: {path}")
+            raise RuntimeError(f"Kalibrasyon görseli okunamadı: {path}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
         return img
 
-    def get_batch_size(self):
+    def get_batch_size(self) -> int:
         return self.batch_size
 
     def get_batch(self, names):
@@ -82,13 +82,13 @@ class EntropyCalibrator(trt.IInt8EntropyCalibrator2):
 
     def read_calibration_cache(self):
         if self.cache_file.exists():
-            print(f"[INFO] Using existing calibration cache: {self.cache_file}")
+            print(f"[INFO] Var olan kalibrasyon cache kullanılacak: {self.cache_file}")
             with open(self.cache_file, "rb") as f:
                 return f.read()
         return None
 
     def write_calibration_cache(self, cache):
-        print(f"[INFO] Writing calibration cache to {self.cache_file}")
+        print(f"[INFO] Kalibrasyon cache yazılıyor: {self.cache_file}")
         with open(self.cache_file, "wb") as f:
             f.write(cache)
 
@@ -111,10 +111,9 @@ def build_int8_calibration_engine(
         if not parser.parse(f.read()):
             for i in range(parser.num_errors):
                 print(parser.get_error(i))
-            raise RuntimeError("ONNX parsing failed")
+            raise RuntimeError("ONNX parse işlemi başarısız oldu.")
 
     config = builder.create_builder_config()
-    # workspace
     try:
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     except AttributeError:
@@ -126,15 +125,14 @@ def build_int8_calibration_engine(
     profile = builder.create_optimization_profile()
     profile.set_shape(
         input_name,
-        (1, c, 320, 320),      # min
-        (1, c, h, w),          # opt
-        (4, c, 1280, 1280),    # max
+        (1, c, 320, 320),
+        (1, c, h, w),
+        (4, c, 1280, 1280),
     )
     config.add_optimization_profile(profile)
 
-    # INT8 + calibrator
     if not builder.platform_has_fast_int8:
-        raise RuntimeError("INT8 not supported on this platform")
+        raise RuntimeError("Bu platform INT8 desteğine sahip değil.")
 
     config.set_flag(trt.BuilderFlag.INT8)
 
@@ -144,10 +142,10 @@ def build_int8_calibration_engine(
         + glob(str(calib_images_dir / "*.png"))
     )
     if len(calib_paths) == 0:
-        raise RuntimeError(f"No calibration images found in {calib_images_dir}")
+        raise RuntimeError(f"Kalibrasyon için görüntü bulunamadı: {calib_images_dir}")
 
     calib_paths = calib_paths[:n_calib]
-    print(f"[INFO] Using {len(calib_paths)} images for INT8 calibration")
+    print(f"[INFO] INT8 kalibrasyon için {len(calib_paths)} görüntü kullanılacak.")
 
     calibrator = EntropyCalibrator(
         calib_paths,
@@ -157,12 +155,12 @@ def build_int8_calibration_engine(
     )
     config.int8_calibrator = calibrator
 
-    print("[INFO] Building temporary INT8 engine for calibration (this may take a while)...")
+    print("[INFO] Kalibrasyon için geçici INT8 engine oluşturuluyor (biraz sürebilir)...")
     engine = builder.build_engine(network, config)
     if engine is None:
-        raise RuntimeError("Failed to build INT8 engine for calibration")
+        raise RuntimeError("Kalibrasyon için INT8 engine oluşturulamadı.")
 
-    print("[OK] Calibration finished, cache written to models/calibration.cache")
+    print("[OK] Kalibrasyon tamamlandı, cache models/calibration.cache dosyasına yazıldı.")
 
 
 def parse_args():

@@ -48,17 +48,6 @@ def get_gpu_stats() -> Dict[str, Optional[float | str]]:
 
 
 class LatencyMeter:
-    """
-    Tracks request latencies and exposes:
-      - global average
-      - moving average (window_size)
-      - p50 / p90 / p95
-      - FPS estimate (requests/second)
-      - total request count
-
-    All units are milliseconds for latencies.
-    """
-
     def __init__(self, window_size: int = 100) -> None:
         self.window_size = window_size
         self._latencies: Deque[float] = deque(maxlen=window_size)
@@ -82,16 +71,6 @@ class LatencyMeter:
         return float(sorted_vals[k])
 
     def get_stats(self) -> Dict[str, float | int]:
-        """
-        Returns JSON-friendly stats dict:
-          - avg_latency_ms (global)
-          - moving_avg_latency_ms (window)
-          - p50_latency_ms
-          - p90_latency_ms
-          - p95_latency_ms
-          - fps
-          - total_requests
-        """
         lat_sorted = sorted(self._latencies)
         if lat_sorted:
             window_avg = float(mean(lat_sorted))
