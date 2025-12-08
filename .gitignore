@@ -38,3 +38,6 @@ training/logs/*/events.out.tfevents.*  # TensorBoard event dosyaları çok büy�
 # OS
 .DS_Store
 Thumbs.db
+
+*.mp4
+test_video_engine.py

@@ -1,5 +1,3 @@
-# inference/detector.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,7 +30,7 @@ class Detector:
         iou_thres: float = 0.45,
         device: str = "cpu",
         onnx_providers: Optional[Sequence[str]] = None,
-        class_names: Optional[Sequence[str]] = None,  # 👈 EKLENDİ
+        class_names: Optional[Sequence[str]] = None,
     ):
         self.backend = backend.lower()
         self.model_path = str(model_path)
@@ -41,62 +39,121 @@ class Detector:
         self.iou_thres = iou_thres
         self.device = device
         self.onnx_providers = list(onnx_providers) if onnx_providers is not None else None
-
-        # sınıf isimleri (örn: ["person", "bicycle", ...])
         self.class_names: Optional[List[str]] = (
             list(class_names) if class_names is not None else None
         )
 
-        if self.backend not in ("torch", "onnx"):
+        self.model = None
+        self.ort_session = None
+
+        self.trt_logger = None
+        self.trt_runtime = None
+        self.trt_engine = None
+        self.trt_context = None
+        self.trt_input_idx = None
+        self.trt_output_idx = None
+
+        if self.backend not in ("torch", "onnx", "tensorrt"):
             raise ValueError(f"Unsupported backend: {backend}")
 
         if self.backend == "torch":
-            # PyTorch YOLO
-            self.model = YOLO(self.model_path)
-            try:
-                self.model.to(self.device)
-            except Exception:
-                # Lightning'te device problemi olursa sessizce CPU'da devam edelim
-                pass
-            self.ort_session = None
-            print(f"[Detector] PyTorch backend, model={self.model_path}, device={self.device}")
-
+            self._init_torch_backend()
+        elif self.backend == "onnx":
+            self._init_onnx_backend()
         else:
-            # ONNX Runtime
-            import onnxruntime as ort
+            self._init_trt_backend()
 
-            if self.onnx_providers is None:
-                # CUDA yoksa zaten CPU'ya düşecek
-                self.onnx_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    # ------------------- init backends -------------------
 
-            sess_opts = ort.SessionOptions()
-            sess_opts.log_severity_level = 2
+    def _init_torch_backend(self) -> None:
+        self.model = YOLO(self.model_path)
+        try:
+            self.model.to(self.device)
+        except Exception:
+            pass
+        print(f"[Detector] PyTorch backend, model={self.model_path}, device={self.device}")
 
-            try:
-                self.ort_session = ort.InferenceSession(
-                    self.model_path, sess_opts, providers=self.onnx_providers
-                )
-            except Exception as e:
-                print(f"[Detector][WARN] ORT session with {self.onnx_providers} failed: {e}")
-                self.onnx_providers = ["CPUExecutionProvider"]
-                self.ort_session = ort.InferenceSession(
-                    self.model_path, sess_opts, providers=self.onnx_providers
-                )
+    def _init_onnx_backend(self) -> None:
+        import onnxruntime as ort
 
-            self.model = None
-            print(
-                f"[Detector] ONNX backend, model={self.model_path}, "
-                f"providers={self.onnx_providers}"
+        if self.onnx_providers is None:
+            self.onnx_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+        sess_opts = ort.SessionOptions()
+        sess_opts.log_severity_level = 2
+
+        try:
+            self.ort_session = ort.InferenceSession(
+                self.model_path, sess_opts, providers=self.onnx_providers
+            )
+        except Exception:
+            self.onnx_providers = ["CPUExecutionProvider"]
+            self.ort_session = ort.InferenceSession(
+                self.model_path, sess_opts, providers=self.onnx_providers
             )
 
-    # ------------------------------------------------------------------
-    # Ana API
-    # ------------------------------------------------------------------
+        print(
+            f"[Detector] ONNX backend, model={self.model_path}, "
+            f"providers={self.onnx_providers}"
+        )
+
+    def _init_trt_backend(self) -> None:
+        try:
+            import tensorrt as trt  # type: ignore
+            import pycuda.driver as cuda  # type: ignore
+            import pycuda.autoinit  # noqa: F401  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"TensorRT backend requires NVIDIA GPU, TensorRT and pycuda installed. Error: {e}"
+            )
+
+        self.trt_logger = trt.Logger(trt.Logger.WARNING)
+        self.trt_runtime = trt.Runtime(self.trt_logger)
+
+        with open(self.model_path, "rb") as f:
+            engine_bytes = f.read()
+
+        self.trt_engine = self.trt_runtime.deserialize_cuda_engine(engine_bytes)
+        if self.trt_engine is None:
+            raise RuntimeError(f"Failed to deserialize TensorRT engine: {self.model_path}")
+
+        self.trt_context = self.trt_engine.create_execution_context()
+        if self.trt_context is None:
+            raise RuntimeError("Failed to create TensorRT execution context")
+
+        # Assume single input and single output
+        num_bindings = self.trt_engine.num_bindings
+        if num_bindings != 2:
+            raise RuntimeError(
+                f"Expected 2 bindings (1 input, 1 output), got {num_bindings}"
+            )
+
+        input_idx = None
+        output_idx = None
+        for i in range(num_bindings):
+            if self.trt_engine.binding_is_input(i):
+                input_idx = i
+            else:
+                output_idx = i
+
+        if input_idx is None or output_idx is None:
+            raise RuntimeError("Failed to identify input/output bindings for TensorRT engine")
+
+        self.trt_input_idx = input_idx
+        self.trt_output_idx = output_idx
+
+        # Warm up shape for dynamic engines
+        self.trt_context.set_binding_shape(
+            self.trt_input_idx, (1, 3, self.imgsz, self.imgsz)
+        )
+        print(f"[Detector] TensorRT backend, engine={self.model_path}")
+
+    # ------------------- public API -------------------
+
     def __call__(
         self,
         frames: Union[np.ndarray, Sequence[np.ndarray]],
     ) -> Union[List[Detection], List[List[Detection]]]:
-        # frames None ise boş dön
         if frames is None:
             return []
 
@@ -113,14 +170,15 @@ class Detector:
 
         if self.backend == "torch":
             all_dets = [self._infer_torch_single(img) for img in batch]
-        else:
+        elif self.backend == "onnx":
             all_dets = [self._infer_onnx_single(img) for img in batch]
+        else:
+            all_dets = [self._infer_trt_single(img) for img in batch]
 
         return all_dets[0] if single else all_dets
 
-    # ------------------------------------------------------------------
-    # PyTorch path (Ultralytics kendi post-process)
-    # ------------------------------------------------------------------
+    # ------------------- PyTorch path -------------------
+
     def _infer_torch_single(self, img_bgr: np.ndarray) -> List[Detection]:
         if img_bgr is None:
             return []
@@ -167,9 +225,8 @@ class Detector:
             )
         return dets
 
-    # ------------------------------------------------------------------
-    # ONNX Runtime path + manuel post-process
-    # ------------------------------------------------------------------
+    # ------------------- ONNX path -------------------
+
     def _infer_onnx_single(self, img_bgr: np.ndarray) -> List[Detection]:
         if img_bgr is None:
             return []
@@ -180,40 +237,35 @@ class Detector:
 
         orig_h, orig_w = img_bgr.shape[:2]
 
-        # 1) Preprocess
         img_resized = cv2.resize(img_bgr, (self.imgsz, self.imgsz))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         img_norm = img_rgb.astype(np.float32) / 255.0
-        img_chw = np.transpose(img_norm, (2, 0, 1))  # (3, H, W)
-        inp = img_chw[None, :, :, :]  # (1, 3, H, W)
+        img_chw = np.transpose(img_norm, (2, 0, 1))
+        inp = img_chw[None, :, :, :]
 
         input_name = sess.get_inputs()[0].name
         outputs = sess.run(None, {input_name: inp})
 
         out = outputs[0]
-        # Örn: (1, 9, 8400) -> (9, 8400) veya (8400, 9)
         out = np.squeeze(out, axis=0)
-        print("[ONNX] raw output shape after squeeze:", out.shape)
 
         if out.ndim != 2:
             return []
 
-        if out.shape[0] == 9:
-            out = out.transpose(1, 0)  # (8400, 9)
+        if out.shape[0] < out.shape[1]:
+            # (C, N) -> (N, C) if needed
+            out = out.transpose(1, 0)
 
         num_preds, num_ch = out.shape
         if num_ch < 5:
             return []
 
-        # Varsayım: 4 bbox (cx, cy, w, h) + 5 class skor = 9
-        xywh = out[:, :4]          # (N, 4)
-        class_scores = out[:, 4:]  # (N, 5)
+        xywh = out[:, :4]
+        class_scores = out[:, 4:]
 
-        # class_scores içinden max skor + sınıf id
         best_scores = class_scores.max(axis=1)
         best_cls = class_scores.argmax(axis=1)
 
-        # conf threshold
         keep = best_scores >= self.conf_thres
         xywh = xywh[keep]
         best_scores = best_scores[keep]
@@ -222,10 +274,8 @@ class Detector:
         if xywh.shape[0] == 0:
             return []
 
-        # 2) xywh -> xyxy
         boxes_xyxy = self._xywh_to_xyxy(xywh)
 
-        # 3) 640x640 -> orijinal boyuta scale
         scale_x = orig_w / float(self.imgsz)
         scale_y = orig_h / float(self.imgsz)
         boxes_xyxy[:, 0] *= scale_x
@@ -233,7 +283,6 @@ class Detector:
         boxes_xyxy[:, 1] *= scale_y
         boxes_xyxy[:, 3] *= scale_y
 
-        # 4) NMS
         keep_idx = self._nms(boxes_xyxy, best_scores, self.iou_thres)
         boxes_xyxy = boxes_xyxy[keep_idx]
         scores = best_scores[keep_idx]
@@ -255,14 +304,104 @@ class Detector:
 
         return dets
 
-    # ----------------- yardımcılar -----------------
+    # ------------------- TensorRT path -------------------
+
+    def _infer_trt_single(self, img_bgr: np.ndarray) -> List[Detection]:
+        if img_bgr is None:
+            return []
+        if self.trt_engine is None or self.trt_context is None:
+            return []
+
+        import numpy as np
+        import pycuda.driver as cuda  # type: ignore
+
+        orig_h, orig_w = img_bgr.shape[:2]
+
+        img_resized = cv2.resize(img_bgr, (self.imgsz, self.imgsz))
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_norm = img_rgb.astype(np.float32) / 255.0
+        img_chw = np.transpose(img_norm, (2, 0, 1))
+        inp = img_chw[None, :, :, :].astype(np.float32)
+
+        self.trt_context.set_binding_shape(self.trt_input_idx, inp.shape)
+
+        input_shape = self.trt_context.get_binding_shape(self.trt_input_idx)
+        output_shape = self.trt_context.get_binding_shape(self.trt_output_idx)
+
+        d_input = cuda.mem_alloc(inp.nbytes)
+        out_size = int(np.prod(output_shape)) * np.dtype(np.float32).itemsize
+        d_output = cuda.mem_alloc(out_size)
+
+        bindings = [0] * self.trt_engine.num_bindings
+        bindings[self.trt_input_idx] = int(d_input)
+        bindings[self.trt_output_idx] = int(d_output)
+
+        cuda.memcpy_htod(d_input, inp)
+        self.trt_context.execute_v2(bindings)
+
+        out = np.empty(output_shape, dtype=np.float32)
+        cuda.memcpy_dtoh(out, d_output)
+
+        out = np.squeeze(out, axis=0)
+
+        if out.ndim != 2:
+            return []
+
+        if out.shape[0] < out.shape[1]:
+            out = out.transpose(1, 0)
+
+        num_preds, num_ch = out.shape
+        if num_ch < 5:
+            return []
+
+        xywh = out[:, :4]
+        class_scores = out[:, 4:]
+
+        best_scores = class_scores.max(axis=1)
+        best_cls = class_scores.argmax(axis=1)
+
+        keep = best_scores >= self.conf_thres
+        xywh = xywh[keep]
+        best_scores = best_scores[keep]
+        best_cls = best_cls[keep]
+
+        if xywh.shape[0] == 0:
+            return []
+
+        boxes_xyxy = self._xywh_to_xyxy(xywh)
+
+        scale_x = orig_w / float(self.imgsz)
+        scale_y = orig_h / float(self.imgsz)
+        boxes_xyxy[:, 0] *= scale_x
+        boxes_xyxy[:, 2] *= scale_x
+        boxes_xyxy[:, 1] *= scale_y
+        boxes_xyxy[:, 3] *= scale_y
+
+        keep_idx = self._nms(boxes_xyxy, best_scores, self.iou_thres)
+        boxes_xyxy = boxes_xyxy[keep_idx]
+        scores = best_scores[keep_idx]
+        cls_ids = best_cls[keep_idx]
+
+        dets: List[Detection] = []
+        for i in range(len(scores)):
+            x1, y1, x2, y2 = boxes_xyxy[i].tolist()
+            dets.append(
+                Detection(
+                    x1=float(x1),
+                    y1=float(y1),
+                    x2=float(x2),
+                    y2=float(y2),
+                    score=float(scores[i]),
+                    cls=int(cls_ids[i]),
+                )
+            )
+
+        return dets
+
+    # ------------------- helpers -------------------
 
     @staticmethod
     def _xywh_to_xyxy(xywh: np.ndarray) -> np.ndarray:
-        """
-        xywh: (N, 4), (cx, cy, w, h)
-        -> (N, 4), (x1, y1, x2, y2)
-        """
         cx = xywh[:, 0]
         cy = xywh[:, 1]
         w = xywh[:, 2]
@@ -277,10 +416,6 @@ class Detector:
 
     @staticmethod
     def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> List[int]:
-        """
-        boxes: (N, 4)  xyxy
-        scores: (N,)
-        """
         if len(boxes) == 0:
             return []
 

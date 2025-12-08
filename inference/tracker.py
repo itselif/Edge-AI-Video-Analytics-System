@@ -1,10 +1,9 @@
-# inference/tracker.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
+import cv2
 import numpy as np
 
 from .detector import Detection
@@ -19,29 +18,34 @@ class Track:
     age: int = 0
     lost: int = 0
     is_active: bool = True
+    cv2_tracker: Optional[object] = None  # OpenCV CSRT tracker
 
 
 class MultiObjectTracker:
+    """
+    IoU-based multi-object tracking for association on detector frames,
+    combined with OpenCV CSRT trackers to propagate boxes on frames
+    where the detector is not run.
+    """
 
     def __init__(
         self,
-        tracker_type: str = "IOU",
+        tracker_type: str = "IOU_CSRT",
         max_lost: int = 30,
         iou_thres: float = 0.5,
     ):
         self.tracker_type = tracker_type
         self.max_lost = max_lost
 
-        # IoU tabanlı eşleştirme ve drift eşiği
         self.iou_thres = iou_thres
-        self.drift_iou_thres = iou_thres  # VideoEngine ve fusion için alias
+        self.drift_iou_thres = iou_thres
 
         self.tracks: List[Track] = []
         self.next_id: int = 1
 
-    # --------------------------
-    # Public API
-    # --------------------------
+    # ---------------------------------------------------------------------
+    # Public API: detector + tracker
+    # ---------------------------------------------------------------------
     def update_with_detections(
         self,
         frame_bgr: np.ndarray,
@@ -59,9 +63,14 @@ class MultiObjectTracker:
         det_classes = np.array([d.cls for d in detections], dtype=np.int32)
 
         if len(self.tracks) == 0:
-            # İlk kare → tüm detection'lardan track oluştur
+            # First frame: create tracks for all detections
             for i in range(len(detections)):
-                self._init_track(det_bboxes[i], float(det_scores[i]), int(det_classes[i]))
+                self._init_track(
+                    frame_bgr=frame_bgr,
+                    bbox=det_bboxes[i],
+                    score=float(det_scores[i]),
+                    cls=int(det_classes[i]),
+                )
             return self.tracks
 
         track_bboxes = np.array([t.bbox for t in self.tracks], dtype=np.float32)
@@ -71,7 +80,7 @@ class MultiObjectTracker:
         matched_tracks = set()
         matched_dets = set()
 
-        # IoU'ya göre greedy eşleştirme
+        # Greedy IoU-based matching
         flat_indices = [(t, d) for t in range(num_tracks) for d in range(num_dets)]
         flat_indices.sort(key=lambda x: iou_mat[x[0], x[1]], reverse=True)
 
@@ -80,10 +89,10 @@ class MultiObjectTracker:
                 continue
             iou = iou_mat[t_idx, d_idx]
             if iou < self.iou_thres:
-                # IoU düşük → drift (bu detection bu track'e bağlanmasın)
                 continue
 
             self._update_track(
+                frame_bgr=frame_bgr,
                 track=self.tracks[t_idx],
                 bbox=det_bboxes[d_idx],
                 score=float(det_scores[d_idx]),
@@ -92,21 +101,22 @@ class MultiObjectTracker:
             matched_tracks.add(t_idx)
             matched_dets.add(d_idx)
 
-        # Eşleşmeyen detection'lar için yeni track aç
+        # Unmatched detections → new tracks
         for d_idx in range(num_dets):
             if d_idx not in matched_dets:
                 self._init_track(
-                    det_bboxes[d_idx],
-                    float(det_scores[d_idx]),
-                    int(det_classes[d_idx]),
+                    frame_bgr=frame_bgr,
+                    bbox=det_bboxes[d_idx],
+                    score=float(det_scores[d_idx]),
+                    cls=int(det_classes[d_idx]),
                 )
 
-        # Eşleşmeyen track'ler → kaybolmuş say
+        # Unmatched tracks → lost++
         for t_idx in range(num_tracks):
             if t_idx not in matched_tracks:
                 trk = self.tracks[t_idx]
-                trk.lost += 1
                 trk.age += 1
+                trk.lost += 1
                 if trk.lost > self.max_lost:
                     trk.is_active = False
 
@@ -114,8 +124,25 @@ class MultiObjectTracker:
         return self.tracks
 
     def track_only(self, frame_bgr: np.ndarray) -> List[Track]:
-
+        """
+        Update tracks using OpenCV CSRT trackers when no detections are available.
+        """
         for trk in self.tracks:
+            if trk.cv2_tracker is not None:
+                ok, box = trk.cv2_tracker.update(frame_bgr)
+                if ok:
+                    x, y, w, h = box
+                    x1 = float(x)
+                    y1 = float(y)
+                    x2 = float(x + w)
+                    y2 = float(y + h)
+                    trk.bbox = np.array([x1, y1, x2, y2], dtype=np.float32)
+                    trk.age += 1
+                    trk.lost = 0
+                    trk.is_active = True
+                    continue
+
+            # If tracker is missing or update failed
             trk.age += 1
             trk.lost += 1
             if trk.lost > self.max_lost:
@@ -124,10 +151,22 @@ class MultiObjectTracker:
         self._remove_dead_tracks()
         return self.tracks
 
-    # --------------------------
+    # ---------------------------------------------------------------------
     # Internal helpers
-    # --------------------------
-    def _init_track(self, bbox: np.ndarray, score: float, cls: int):
+    # ---------------------------------------------------------------------
+    def _create_csrt_tracker(self) -> object:
+        try:
+            return cv2.legacy.TrackerCSRT_create()  # OpenCV >= 4.5 (legacy module)
+        except AttributeError:
+            return cv2.TrackerCSRT_create()  # Older OpenCV builds
+
+    def _init_track(self, frame_bgr: np.ndarray, bbox: np.ndarray, score: float, cls: int):
+        tracker = self._create_csrt_tracker()
+        x1, y1, x2, y2 = bbox.tolist()
+        w = float(x2 - x1)
+        h = float(y2 - y1)
+        tracker.init(frame_bgr, (float(x1), float(y1), w, h))
+
         new_track = Track(
             track_id=self.next_id,
             bbox=bbox.copy(),
@@ -136,17 +175,32 @@ class MultiObjectTracker:
             age=1,
             lost=0,
             is_active=True,
+            cv2_tracker=tracker,
         )
         self.tracks.append(new_track)
         self.next_id += 1
 
-    def _update_track(self, track: Track, bbox: np.ndarray, score: float, cls: int):
+    def _update_track(
+        self,
+        frame_bgr: np.ndarray,
+        track: Track,
+        bbox: np.ndarray,
+        score: float,
+        cls: int,
+    ):
         track.bbox = bbox.copy()
         track.score = score
         track.cls = cls
         track.age += 1
         track.lost = 0
         track.is_active = True
+
+        tracker = self._create_csrt_tracker()
+        x1, y1, x2, y2 = bbox.tolist()
+        w = float(x2 - x1)
+        h = float(y2 - y1)
+        tracker.init(frame_bgr, (float(x1), float(y1), w, h))
+        track.cv2_tracker = tracker
 
     def _increment_lost(self):
         for trk in self.tracks:
