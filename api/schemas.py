@@ -1,3 +1,4 @@
+# api/schemas.py
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -32,7 +33,9 @@ class MetricsResponse(BaseModel):
     model_path: str
 
     avg_latency_ms: float
+    moving_avg_latency_ms: float
     p50_latency_ms: float
+    p90_latency_ms: float
     p95_latency_ms: float
     fps: float
     total_requests: int

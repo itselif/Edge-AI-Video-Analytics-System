@@ -32,6 +32,7 @@ class Detector:
         iou_thres: float = 0.45,
         device: str = "cpu",
         onnx_providers: Optional[Sequence[str]] = None,
+        class_names: Optional[Sequence[str]] = None,  # 👈 EKLENDİ
     ):
         self.backend = backend.lower()
         self.model_path = str(model_path)
@@ -40,6 +41,11 @@ class Detector:
         self.iou_thres = iou_thres
         self.device = device
         self.onnx_providers = list(onnx_providers) if onnx_providers is not None else None
+
+        # sınıf isimleri (örn: ["person", "bicycle", ...])
+        self.class_names: Optional[List[str]] = (
+            list(class_names) if class_names is not None else None
+        )
 
         if self.backend not in ("torch", "onnx"):
             raise ValueError(f"Unsupported backend: {backend}")
@@ -50,6 +56,7 @@ class Detector:
             try:
                 self.model.to(self.device)
             except Exception:
+                # Lightning'te device problemi olursa sessizce CPU'da devam edelim
                 pass
             self.ort_session = None
             print(f"[Detector] PyTorch backend, model={self.model_path}, device={self.device}")
@@ -59,6 +66,7 @@ class Detector:
             import onnxruntime as ort
 
             if self.onnx_providers is None:
+                # CUDA yoksa zaten CPU'ya düşecek
                 self.onnx_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
             sess_opts = ort.SessionOptions()
@@ -76,7 +84,10 @@ class Detector:
                 )
 
             self.model = None
-            print(f"[Detector] ONNX backend, model={self.model_path}, providers={self.onnx_providers}")
+            print(
+                f"[Detector] ONNX backend, model={self.model_path}, "
+                f"providers={self.onnx_providers}"
+            )
 
     # ------------------------------------------------------------------
     # Ana API
@@ -180,9 +191,8 @@ class Detector:
         outputs = sess.run(None, {input_name: inp})
 
         out = outputs[0]
-        # Debug: şekli görelim
-        # Örn: (1, 9, 8400)
-        out = np.squeeze(out, axis=0)  # (C, N) veya (N, C)
+        # Örn: (1, 9, 8400) -> (9, 8400) veya (8400, 9)
+        out = np.squeeze(out, axis=0)
         print("[ONNX] raw output shape after squeeze:", out.shape)
 
         if out.ndim != 2:
