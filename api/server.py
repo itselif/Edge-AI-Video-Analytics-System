@@ -1,4 +1,3 @@
-# api/server.py
 from __future__ import annotations
 
 import io
@@ -20,7 +19,7 @@ from api.schemas import (
     MetricsResponse,
 )
 
-# Sadece 5 sınıf: COCO_5CLS
+# COCO subset with 5 classes
 COCO_5CLS = ["person", "bicycle", "car", "motorcycle", "bus"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +32,7 @@ DEFAULT_MODEL_ONNX = MODELS_DIR / "model.onnx"
 
 app = FastAPI(title="Edge AI Video Analytics API")
 
-# CORS (frontend vs. bağlanmak isterse rahat olsun diye)
+# CORS configuration (for frontend integration)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,18 +40,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Monitoring objeleri (global)
+# Global monitoring objects
 METRICS = LatencyMeter(window_size=100)
 EVENT_LOGGER = JsonLogger(str(LOG_DIR / "api_events.jsonl"))
 
-# Global detector
+# Global detector instance
 detector: Detector | None = None
 
 
 @app.on_event("startup")
 def startup_event() -> None:
     """
-    Uygulama ayağa kalkarken ONNX modelini yükler.
+    Initialize the detector on application startup.
     """
     global detector
     model_path = DEFAULT_MODEL_ONNX
@@ -63,8 +62,8 @@ def startup_event() -> None:
         imgsz=640,
         conf_thres=0.25,
         iou_thres=0.45,
-        device="cuda",  # CUDA yoksa ORT zaten CPU'ya düşecek
-        class_names=COCO_5CLS,  # 👈 LABEL İÇİN ÖNEMLİ
+        device="cuda",  # falls back to CPU if CUDA is not available
+        class_names=COCO_5CLS,
     )
 
     print(f"[API] Loaded detector backend={DEFAULT_BACKEND}, model={model_path}")
@@ -73,7 +72,7 @@ def startup_event() -> None:
 @app.on_event("shutdown")
 def shutdown_event() -> None:
     """
-    Uygulama kapanırken log dosyasını kapat.
+    Clean up resources on application shutdown.
     """
     EVENT_LOGGER.close()
 
@@ -81,22 +80,19 @@ def shutdown_event() -> None:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """
-    Basit health-check endpoint'i.
+    Basic health-check endpoint.
     """
-    backend = DEFAULT_BACKEND
-    model_path = str(DEFAULT_MODEL_ONNX)
     return HealthResponse(
         status="ok",
-        backend=backend,
-        model_path=model_path,
+        backend=DEFAULT_BACKEND,
+        model_path=str(DEFAULT_MODEL_ONNX),
         detail="Service healthy",
     )
 
 
 def _detections_to_bboxes(det_list: List[Detection]) -> List[BBox]:
     """
-    Detection -> BBox (API schema) dönüşümü.
-    Burada cls_id ve (varsa) label alanını dolduruyoruz.
+    Convert internal Detection objects to API BBox schema.
     """
     boxes: List[BBox] = []
 
@@ -104,7 +100,6 @@ def _detections_to_bboxes(det_list: List[Detection]) -> List[BBox]:
         cls_id = int(d.cls)
         label = None
 
-        # Güvenli şekilde class name çek
         if detector is not None and getattr(detector, "class_names", None) is not None:
             if 0 <= cls_id < len(detector.class_names):
                 label = detector.class_names[cls_id]
@@ -127,11 +122,11 @@ def _detections_to_bboxes(det_list: List[Detection]) -> List[BBox]:
 @app.post("/detect", response_model=DetectResponse)
 async def detect(file: UploadFile = File(...)) -> DetectResponse:
     """
-    Görsel dosya alır → modelle inference yapar → bbox + skor + latency döner.
+    Run object detection on an uploaded image and return bounding boxes,
+    scores, and inference latency.
     """
     assert detector is not None, "Detector is not initialized"
 
-    # Dosyayı oku → PIL → numpy BGR
     raw_bytes = await file.read()
     img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
     frame = np.array(img)[:, :, ::-1]  # RGB -> BGR
@@ -145,7 +140,7 @@ async def detect(file: UploadFile = File(...)) -> DetectResponse:
 
     bboxes = _detections_to_bboxes(det_list)
 
-    # JSON logging (monitoring/dashboard için)
+    # JSON logging for offline analysis (dashboard, etc.)
     EVENT_LOGGER.log(
         "detect",
         {
@@ -166,7 +161,7 @@ async def detect(file: UploadFile = File(...)) -> DetectResponse:
 @app.get("/metrics", response_model=MetricsResponse)
 def metrics() -> MetricsResponse:
     """
-    Latency istatistikleri + GPU bilgisi dönen endpoint.
+    Return latency statistics and GPU metrics.
     """
     stats = METRICS.get_stats()
     gpu = get_gpu_stats()

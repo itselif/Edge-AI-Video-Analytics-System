@@ -1,0 +1,261 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 8%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 174 72% 50%;
+    --primary-foreground: 222 47% 6%;
+
+    --secondary: 222 40% 14%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 222 30% 18%;
+    --muted-foreground: 215 20% 55%;
+
+    --accent: 280 70% 60%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 222 30% 18%;
+    --input: 222 30% 18%;
+    --ring: 174 72% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom tokens */
+    --success: 160 72% 45%;
+    --warning: 38 92% 50%;
+    --info: 210 100% 55%;
+
+    --glow-primary: 0 0 40px hsl(174 72% 50% / 0.3);
+    --glow-accent: 0 0 40px hsl(280 70% 60% / 0.3);
+
+    --gradient-primary: linear-gradient(135deg, hsl(174 72% 50%), hsl(200 80% 50%));
+    --gradient-accent: linear-gradient(135deg, hsl(280 70% 60%), hsl(320 70% 55%));
+    --gradient-surface: linear-gradient(180deg, hsl(222 47% 10%), hsl(222 47% 6%));
+    --gradient-glow: radial-gradient(ellipse at 50% 0%, hsl(174 72% 50% / 0.15), transparent 50%);
+
+    --sidebar-background: 222 47% 8%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 174 72% 50%;
+    --sidebar-primary-foreground: 222 47% 6%;
+    --sidebar-accent: 222 40% 14%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 222 30% 18%;
+    --sidebar-ring: 174 72% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+  }
+
+  code, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-card/60 backdrop-blur-xl border border-border/50 rounded-2xl;
+  }
+
+  .glow-primary {
+    box-shadow: var(--glow-primary);
+  }
+
+  .glow-accent {
+    box-shadow: var(--glow-accent);
+  }
+
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: var(--gradient-primary);
+  }
+
+  .gradient-border {
+    position: relative;
+  }
+
+  .gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    padding: 1px;
+    border-radius: inherit;
+    background: var(--gradient-primary);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  .stat-card {
+    @apply glass-panel p-4 relative overflow-hidden;
+  }
+
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--gradient-primary);
+    opacity: 0.5;
+  }
+
+  .detection-mode-tab {
+    @apply px-6 py-3 rounded-xl font-medium text-sm transition-all duration-300;
+  }
+
+  .detection-mode-tab[data-state="active"] {
+    @apply bg-primary text-primary-foreground shadow-lg;
+    box-shadow: var(--glow-primary);
+  }
+
+  .detection-mode-tab[data-state="inactive"] {
+    @apply text-muted-foreground hover:text-foreground hover:bg-secondary;
+  }
+
+  .pulse-dot {
+    @apply w-2 h-2 rounded-full bg-primary;
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 hsl(var(--primary) / 0.7);
+    }
+    50% {
+      opacity: 0.8;
+      box-shadow: 0 0 0 8px hsl(var(--primary) / 0);
+    }
+  }
+
+  .fps-badge {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold;
+    background: linear-gradient(135deg, hsl(var(--success) / 0.2), hsl(var(--success) / 0.1));
+    border: 1px solid hsl(var(--success) / 0.3);
+    color: hsl(var(--success));
+  }
+
+  .upload-zone {
+    @apply relative border-2 border-dashed border-border/50 rounded-2xl p-8 transition-all duration-300;
+    background: linear-gradient(135deg, hsl(var(--secondary) / 0.5), hsl(var(--card) / 0.5));
+  }
+
+  .upload-zone:hover {
+    @apply border-primary/50;
+    box-shadow: inset 0 0 30px hsl(var(--primary) / 0.05);
+  }
+
+  .upload-zone.drag-over {
+    @apply border-primary bg-primary/5;
+    box-shadow: var(--glow-primary);
+  }
+
+  .canvas-container {
+    @apply relative rounded-xl overflow-hidden bg-background/80;
+    aspect-ratio: 16 / 9;
+  }
+
+  .canvas-overlay {
+    @apply absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm;
+  }
+
+  .metric-value {
+    @apply text-2xl font-bold font-mono tracking-tight;
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.4s ease-out;
+  }
+
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.3s ease-out;
+  }
+
+  @keyframes scaleIn {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
