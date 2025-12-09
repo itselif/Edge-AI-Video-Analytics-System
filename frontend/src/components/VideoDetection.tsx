@@ -1,7 +1,14 @@
-import React, { useRef, useEffect, useState, useCallback } from "react";
-import { Upload, Play, Pause, Square, Video, AlertCircle, Gauge } from "lucide-react";
+import React, { useRef, useState } from "react";
+import {
+  Upload,
+  Play,
+  Pause,
+  Square,
+  Video,
+  AlertCircle,
+  Gauge,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { BBox, DetectResponse } from "@/types/detection";
 
 interface VideoDetectionProps {
   apiBaseUrl: string;
@@ -9,164 +16,144 @@ interface VideoDetectionProps {
 
 export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
   const [file, setFile] = useState<File | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [sourceVideoUrl, setSourceVideoUrl] = useState<string | null>(null);
+  const [processedVideoUrl, setProcessedVideoUrl] = useState<string | null>(
+    null
+  );
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [currentFps, setCurrentFps] = useState<number>(0);
-  const [detectionCount, setDetectionCount] = useState<number>(0);
   const [dragOver, setDragOver] = useState(false);
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const processingRef = useRef<boolean>(false);
-  const lastFrameTimeRef = useRef<number>(0);
-  const fpsHistoryRef = useRef<number[]>([]);
+  const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const processedVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0] || null;
-    processFile(f);
+  // -----------------------------------------------------------
+  // File handling
+  // -----------------------------------------------------------
+  const resetStateForNewFile = () => {
+    setProcessedVideoUrl(null);
+    setIsPlaying(false);
+    setIsProcessing(false);
+    setError(null);
   };
 
   const processFile = (f: File | null) => {
     setFile(f);
-    setError(null);
-    setIsPlaying(false);
-    setIsProcessing(false);
-    setCurrentFps(0);
-    setDetectionCount(0);
+    resetStateForNewFile();
 
     if (f) {
       const url = URL.createObjectURL(f);
-      setVideoUrl(url);
+      setSourceVideoUrl(url);
     } else {
-      setVideoUrl(null);
+      setSourceVideoUrl(null);
     }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] || null;
+    if (f && !f.type.startsWith("video/")) {
+      setError("Please select a valid video file.");
+      return;
+    }
+    processFile(f);
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files?.[0] || null;
-    if (f && f.type.startsWith("video/")) {
-      processFile(f);
+    if (!f) return;
+    if (!f.type.startsWith("video/")) {
+      setError("Please drop a valid video file.");
+      return;
     }
+    processFile(f);
   };
 
-  const processFrame = useCallback(async () => {
-    if (!processingRef.current || !videoRef.current || !canvasRef.current) return;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-
-    if (!ctx || video.paused || video.ended) {
-      processingRef.current = false;
-      setIsProcessing(false);
+  // -----------------------------------------------------------
+  // Backend call: /detect_video  (offline processing)
+  // -----------------------------------------------------------
+  const handleStartDetection = async () => {
+    if (!file) {
+      setError("Please upload a video first.");
       return;
     }
 
-    // Capture current frame
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
+    setIsProcessing(true);
+    setError(null);
+    setProcessedVideoUrl(null);
 
     try {
-      // Convert canvas to blob
-      const blob = await new Promise<Blob>((resolve) => {
-        canvas.toBlob((b) => resolve(b!), "image/jpeg", 0.8);
-      });
-
       const formData = new FormData();
-      formData.append("file", blob, "frame.jpg");
+      formData.append("file", file);
 
-      const startTime = performance.now();
-      const res = await fetch(`${apiBaseUrl}/detect`, {
+      const res = await fetch(`${apiBaseUrl}/detect_video`, {
         method: "POST",
         body: formData,
       });
 
-      if (!res.ok) throw new Error(`Request failed`);
+      if (!res.ok) {
+        throw new Error(`Video detection failed with status ${res.status}`);
+      }
 
-      const data: DetectResponse = await res.json();
-      const endTime = performance.now();
-
-      // Calculate FPS
-      const frameTime = endTime - startTime;
-      fpsHistoryRef.current.push(1000 / frameTime);
-      if (fpsHistoryRef.current.length > 10) fpsHistoryRef.current.shift();
-      const avgFps = fpsHistoryRef.current.reduce((a, b) => a + b, 0) / fpsHistoryRef.current.length;
-      setCurrentFps(avgFps);
-      setDetectionCount(data.num_detections);
-
-      // Draw detections
-      ctx.lineWidth = 3;
-      data.detections.forEach((det) => {
-        const hue = (det.cls_id * 67) % 360;
-        ctx.strokeStyle = `hsl(${hue}, 80%, 55%)`;
-        ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
-
-        const width = det.x2 - det.x1;
-        const height = det.y2 - det.y1;
-        ctx.strokeRect(det.x1, det.y1, width, height);
-
-        const label = `${det.label ?? det.cls_id} ${det.score.toFixed(2)}`;
-        ctx.font = "bold 14px JetBrains Mono, monospace";
-        const textMetrics = ctx.measureText(label);
-        const textW = textMetrics.width + 12;
-        const textH = 22;
-        const boxY = Math.max(0, det.y1 - textH - 4);
-        ctx.fillRect(det.x1, boxY, textW, textH);
-        ctx.fillStyle = "#000000";
-        ctx.fillText(label, det.x1 + 6, boxY + textH - 6);
-      });
-    } catch (err) {
-      console.error("Frame processing error:", err);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setProcessedVideoUrl(url);
+    } catch (err: any) {
+      console.error("Video detection error:", err);
+      setError(err?.message || "Video detection failed.");
+    } finally {
+      setIsProcessing(false);
     }
+  };
 
-    if (processingRef.current) {
-      requestAnimationFrame(processFrame);
-    }
-  }, [apiBaseUrl]);
-
+  // -----------------------------------------------------------
+  // Playback controls (play/pause/stop both videos in sync)
+  // -----------------------------------------------------------
   const handlePlay = () => {
-    if (!videoRef.current) return;
-    videoRef.current.play();
+    const src = sourceVideoRef.current;
+    const out = processedVideoRef.current;
+
+    if (!src) return;
+
+    // keep processed video roughly in sync with source
+    if (out && processedVideoUrl) {
+      out.currentTime = src.currentTime;
+      void out.play();
+    }
+
+    void src.play();
     setIsPlaying(true);
   };
 
   const handlePause = () => {
-    if (!videoRef.current) return;
-    videoRef.current.pause();
+    const src = sourceVideoRef.current;
+    const out = processedVideoRef.current;
+
+    src && src.pause();
+    out && out.pause();
     setIsPlaying(false);
   };
 
   const handleStop = () => {
-    if (!videoRef.current) return;
-    videoRef.current.pause();
-    videoRef.current.currentTime = 0;
+    const src = sourceVideoRef.current;
+    const out = processedVideoRef.current;
+
+    if (src) {
+      src.pause();
+      src.currentTime = 0;
+    }
+    if (out) {
+      out.pause();
+      out.currentTime = 0;
+    }
+
     setIsPlaying(false);
-    processingRef.current = false;
-    setIsProcessing(false);
   };
 
-  const startProcessing = () => {
-    processingRef.current = true;
-    setIsProcessing(true);
-    fpsHistoryRef.current = [];
-    processFrame();
-  };
-
-  const stopProcessing = () => {
-    processingRef.current = false;
-    setIsProcessing(false);
-  };
-
-  useEffect(() => {
-    return () => {
-      processingRef.current = false;
-    };
-  }, []);
+  // -----------------------------------------------------------
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -207,14 +194,24 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
         </div>
       </div>
 
-      {/* Video Controls */}
-      {videoUrl && (
+      {/* Controls */}
+      {sourceVideoUrl && (
         <div className="flex flex-wrap gap-2">
-          <Button onClick={handlePlay} disabled={isPlaying} variant="outline" size="sm">
+          <Button
+            onClick={handlePlay}
+            disabled={isPlaying || isProcessing}
+            variant="outline"
+            size="sm"
+          >
             <Play className="w-4 h-4" />
             Play
           </Button>
-          <Button onClick={handlePause} disabled={!isPlaying} variant="outline" size="sm">
+          <Button
+            onClick={handlePause}
+            disabled={!isPlaying}
+            variant="outline"
+            size="sm"
+          >
             <Pause className="w-4 h-4" />
             Pause
           </Button>
@@ -222,18 +219,21 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
             <Square className="w-4 h-4" />
             Stop
           </Button>
+
           <div className="flex-1" />
+
           <Button
-            onClick={isProcessing ? stopProcessing : startProcessing}
-            variant={isProcessing ? "destructive" : "glow"}
+            onClick={handleStartDetection}
+            variant="glow"
             size="sm"
+            disabled={isProcessing || !file}
           >
-            {isProcessing ? "Stop Detection" : "Start Detection"}
+            {isProcessing ? "Processing…" : "Start Detection"}
           </Button>
         </div>
       )}
 
-      {/* Error Message */}
+      {/* Error */}
       {error && (
         <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
           <AlertCircle className="w-4 h-4 text-destructive" />
@@ -241,61 +241,65 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
         </div>
       )}
 
-      {/* Video Display */}
-      {videoUrl && (
+      {/* Video Panels */}
+      {sourceVideoUrl && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Source video */}
           <div className="glass-panel p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold flex items-center gap-2">
                 <Video className="w-4 h-4 text-muted-foreground" />
                 Source Video
               </h3>
-              {isPlaying && (
-                <div className="pulse-dot" />
-              )}
+              {isPlaying && <div className="pulse-dot" />}
             </div>
             <div className="canvas-container">
               <video
-                ref={videoRef}
-                src={videoUrl}
+                ref={sourceVideoRef}
+                src={sourceVideoUrl}
                 className="w-full h-full object-contain"
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
-                onEnded={() => {
-                  setIsPlaying(false);
-                  processingRef.current = false;
-                  setIsProcessing(false);
-                }}
+                onEnded={() => setIsPlaying(false)}
                 muted
+                controls={false}
               />
             </div>
           </div>
 
+          {/* Processed video */}
           <div className="glass-panel p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold flex items-center gap-2">
                 <Gauge className="w-4 h-4 text-primary" />
                 Detection Output
               </h3>
+              {processedVideoUrl && !isProcessing && (
+                <span className="fps-badge">Ready</span>
+              )}
               {isProcessing && (
-                <div className="flex items-center gap-3">
-                  <span className="fps-badge">
-                    {currentFps.toFixed(1)} FPS
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {detectionCount} objects
-                  </span>
-                </div>
+                <span className="fps-badge">Processing…</span>
               )}
             </div>
-            <div className="canvas-container">
-              <canvas ref={canvasRef} className="w-full h-full object-contain" />
-              {!isProcessing && (
-                <div className="canvas-overlay">
-                  <p className="text-sm text-muted-foreground">
-                    Start detection to see results
-                  </p>
-                </div>
+            <div className="canvas-container relative">
+              {processedVideoUrl && !isProcessing ? (
+                <video
+                  ref={processedVideoRef}
+                  src={processedVideoUrl}
+                  className="w-full h-full object-contain"
+                  muted
+                  controls
+                />
+              ) : (
+                <>
+                  <div className="canvas-overlay">
+                    <p className="text-sm text-muted-foreground">
+                      {isProcessing
+                        ? "Processing video… this may take a moment."
+                        : "Start detection to see results"}
+                    </p>
+                  </div>
+                </>
               )}
             </div>
           </div>

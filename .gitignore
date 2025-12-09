@@ -13,7 +13,6 @@ venv/
 
 # Models and large files
 *.pt
-*.onnx
 *.engine
 calibration.cache
 cv-advanced-assessment/models/

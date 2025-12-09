@@ -10,6 +10,13 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+from fastapi.responses import FileResponse
+from inference.video_engine import VideoEngine
+from inference.tracker import MultiObjectTracker
+import tempfile
+import shutil
+import uuid
+
 from inference.detector import Detector, Detection
 from monitoring.logger import LatencyMeter, JsonLogger, get_gpu_stats
 from api.schemas import (
@@ -155,6 +162,51 @@ async def detect(file: UploadFile = File(...)) -> DetectResponse:
         inference_time_ms=float(latency_ms),
         num_detections=len(bboxes),
         detections=bboxes,
+    )
+
+@app.post("/detect_video")
+async def detect_video(file: UploadFile = File(...)):
+    """
+    Process an uploaded video with the detector + tracker pipeline.
+    Returns a new video file with bounding boxes drawn.
+
+    To keep demo responsive, we only process up to max_frames frames.
+    """
+    assert detector is not None, "Detector is not initialized"
+
+    suffix = Path(file.filename).suffix or ".mp4"
+    tmp_in = Path(tempfile.gettempdir()) / f"input_{uuid.uuid4().hex}{suffix}"
+    tmp_out = Path(tempfile.gettempdir()) / f"output_{uuid.uuid4().hex}.mp4"
+
+    with tmp_in.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    tracker = MultiObjectTracker(max_lost=30, iou_thres=0.5)
+    engine = VideoEngine(
+        detector=detector,
+        tracker=tracker,
+        class_names=getattr(detector, "class_names", None),
+        detect_every_n=5,
+        display=False,
+        save_path=str(tmp_out),
+    )
+
+    max_frames = 300  # ~10 seconds @30 FPS, adjust if needed
+
+    start_time = time.time()
+    print(f"[API] /detect_video started, file={tmp_in}, max_frames={max_frames}")
+    engine.run(str(tmp_in), max_frames=max_frames)
+    end_time = time.time()
+    total_ms = (end_time - start_time) * 1000.0
+    print(f"[API] /detect_video finished in {total_ms:.2f} ms, output={tmp_out}")
+
+    # Optional: record as a coarse-grained latency sample
+    METRICS.record_latency(total_ms)
+
+    return FileResponse(
+        path=str(tmp_out),
+        media_type="video/mp4",
+        filename="processed.mp4",
     )
 
 
