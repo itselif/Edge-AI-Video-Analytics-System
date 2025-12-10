@@ -15,7 +15,7 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
   const [processedVideoUrl, setProcessedVideoUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isConverting, setIsConverting] = useState(false);
+  const [videoLoadError, setVideoLoadError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentFps, setCurrentFps] = useState<number>(0);
   const [detectionCount, setDetectionCount] = useState<number>(0);
@@ -42,6 +42,11 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
   };
 
   const processFile = (f: File | null) => {
+    // Cleanup previous blob URLs
+    if (processedVideoUrl?.startsWith('blob:')) {
+      URL.revokeObjectURL(processedVideoUrl);
+    }
+    
     setFile(f);
     setError(null);
     setIsPlaying(false);
@@ -53,6 +58,7 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
     setJobStatus("");
     setProgress(null);
     setEtaSeconds(null);
+    setVideoLoadError(false);
 
     if (f) {
       const url = URL.createObjectURL(f);
@@ -71,28 +77,34 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
     }
   };
 
-  // Convert video to browser-compatible format
-  const convertVideo = async (jid: string): Promise<string | null> => {
+  // Fetch video as blob and create object URL for browser playback
+
+  const fetchVideoAsBlob = async (url: string): Promise<string | null> => {
     try {
-      setIsConverting(true);
-      const res = await fetch(`${apiBaseUrl}/convert_video/${jid}`, {
-        method: "POST",
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.converted_url) {
-          return `${apiBaseUrl}${data.converted_url}?t=${Date.now()}`;
-        }
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Video alınamadı: ${response.status}`);
+      
+      const blob = await response.blob();
+      
+      // WebM/MP4 check
+      const contentType = response.headers.get('content-type') || '';
+      let mimeType = 'video/mp4';
+      
+      if (contentType.includes('webm') || url.includes('.webm')) {
+        mimeType = 'video/webm';
       }
+      
+      console.log(`Video type detected: ${mimeType}`);
+      
+      const fixedBlob = new Blob([blob], { type: mimeType });
+      const blobUrl = URL.createObjectURL(fixedBlob);
+      
+      return blobUrl;
     } catch (err) {
-      console.warn("[VideoDetection] Conversion error:", err);
-    } finally {
-      setIsConverting(false);
+      console.error("Video blob'a dönüştürülemedi:", err);
+      return null;
     }
-    return null;
   };
-
   // Async video processing
   const startAsyncProcessing = async () => {
     if (!file) {
@@ -143,17 +155,20 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
               pollRef.current = null;
             }
 
-            // Try to convert video to browser-compatible format
-            let finalVideoUrl = await convertVideo(jid);
-            
-            if (!finalVideoUrl) {
-              // Fallback to stream endpoint
-              finalVideoUrl = `${apiBaseUrl}/stream_video/${jid}?t=${Date.now()}`;
-            }
-
-            setProcessedVideoUrl(finalVideoUrl);
-            setIsProcessing(false);
             setIsVideoLoading(true);
+            
+            // Fetch video as blob for reliable browser playback
+            const videoUrl = `${apiBaseUrl}/stream_video/${jid}`;
+            const blobUrl = await fetchVideoAsBlob(videoUrl);
+            
+            if (blobUrl) {
+              setProcessedVideoUrl(blobUrl);
+            } else {
+              // Fallback: try direct URL
+              setProcessedVideoUrl(`${apiBaseUrl}/processed/${jid}?t=${Date.now()}`);
+            }
+            
+            setIsProcessing(false);
           }
 
           if (sdata.status === "failed") {
@@ -292,26 +307,27 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
     }
   };
 
-  const tryAlternativeSource = async (type: 'stream' | 'direct' | 'converted') => {
+  const tryAlternativeSource = async (type: 'stream' | 'direct') => {
     if (!jobId) return;
     
-    let newUrl = '';
-    switch (type) {
-      case 'stream':
-        newUrl = `${apiBaseUrl}/stream_video/${jobId}?t=${Date.now()}`;
-        break;
-      case 'direct':
-        newUrl = `${apiBaseUrl}/processed/${jobId}?t=${Date.now()}`;
-        break;
-      case 'converted':
-        const convertedUrl = await convertVideo(jobId);
-        if (convertedUrl) newUrl = convertedUrl;
-        break;
-    }
+    setIsVideoLoading(true);
+    setError(null);
     
-    if (newUrl) {
-      setProcessedVideoUrl(newUrl);
-      setIsVideoLoading(true);
+    const url = type === 'stream' 
+      ? `${apiBaseUrl}/stream_video/${jobId}`
+      : `${apiBaseUrl}/processed/${jobId}`;
+    
+    const blobUrl = await fetchVideoAsBlob(url);
+    
+    if (blobUrl) {
+      // Clean up previous blob URL
+      if (processedVideoUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(processedVideoUrl);
+      }
+      setProcessedVideoUrl(blobUrl);
+    } else {
+      setError("Failed to load video. Try downloading instead.");
+      setIsVideoLoading(false);
     }
   };
 
@@ -333,12 +349,17 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
     }
   };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       processingRef.current = false;
       if (pollRef.current) clearInterval(pollRef.current);
+      // Cleanup blob URLs
+      if (processedVideoUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(processedVideoUrl);
+      }
     };
-  }, []);
+  }, [processedVideoUrl]);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -416,13 +437,13 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
             <span className={`text-sm font-semibold ${getStatusColor(jobStatus)}`}>
               {jobStatus.toUpperCase()}
             </span>
-            {isConverting && (
-              <span className="text-xs text-info animate-pulse ml-2">Converting for browser...</span>
+            {isVideoLoading && jobStatus === "done" && (
+              <span className="text-xs text-info animate-pulse ml-2">Loading video...</span>
             )}
           </div>
-          {jobStatus === "done" && (
+          {jobStatus === "done" && videoLoadError && (
             <Button
-              onClick={() => tryAlternativeSource('converted')}
+              onClick={() => tryAlternativeSource('stream')}
               size="sm"
               variant="ghost"
               className="h-8"
@@ -578,11 +599,14 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
                         playsInline
                         onLoadedData={() => {
                           setIsVideoLoading(false);
+                          setVideoLoadError(false);
                           setError(null);
                         }}
                         onCanPlay={() => setIsVideoLoading(false)}
-                        onError={() => {
+                        onError={(e) => {
+                          console.error("[VideoDetection] Video playback error:", e);
                           setIsVideoLoading(false);
+                          setVideoLoadError(true);
                           setError("Video playback failed. Try alternative sources below.");
                         }}
                       />
