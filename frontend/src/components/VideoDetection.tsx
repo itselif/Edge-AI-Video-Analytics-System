@@ -1,81 +1,100 @@
-import React, { useRef, useState } from "react";
-import {
-  Upload,
-  Play,
-  Pause,
-  Square,
-  Video,
-  AlertCircle,
-  Gauge,
-} from "lucide-react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
+import { Upload, Play, Pause, Square, Video, AlertCircle, Gauge, Download, ExternalLink, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BBox, DetectResponse } from "@/types/detection";
 
 interface VideoDetectionProps {
   apiBaseUrl: string;
 }
 
+type ProcessingMode = "realtime" | "async";
+
 export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
   const [file, setFile] = useState<File | null>(null);
-  const [sourceVideoUrl, setSourceVideoUrl] = useState<string | null>(null);
-  const [processedVideoUrl, setProcessedVideoUrl] = useState<string | null>(
-    null
-  );
-
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [processedVideoUrl, setProcessedVideoUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isConverting, setIsConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [currentFps, setCurrentFps] = useState<number>(0);
+  const [detectionCount, setDetectionCount] = useState<number>(0);
   const [dragOver, setDragOver] = useState(false);
+  const [processingMode, setProcessingMode] = useState<ProcessingMode>("async");
+  
+  // Async processing state
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobStatus, setJobStatus] = useState<string>("");
+  const [progress, setProgress] = useState<number | null>(null);
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
+  const [isVideoLoading, setIsVideoLoading] = useState(false);
 
-  const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const processedVideoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const processingRef = useRef<boolean>(false);
+  const fpsHistoryRef = useRef<number[]>([]);
+  const pollRef = useRef<number | null>(null);
 
-  // -----------------------------------------------------------
-  // File handling
-  // -----------------------------------------------------------
-  const resetStateForNewFile = () => {
-    setProcessedVideoUrl(null);
-    setIsPlaying(false);
-    setIsProcessing(false);
-    setError(null);
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] || null;
+    processFile(f);
   };
 
   const processFile = (f: File | null) => {
     setFile(f);
-    resetStateForNewFile();
+    setError(null);
+    setIsPlaying(false);
+    setIsProcessing(false);
+    setCurrentFps(0);
+    setDetectionCount(0);
+    setProcessedVideoUrl(null);
+    setJobId(null);
+    setJobStatus("");
+    setProgress(null);
+    setEtaSeconds(null);
 
     if (f) {
       const url = URL.createObjectURL(f);
-      setSourceVideoUrl(url);
+      setVideoUrl(url);
     } else {
-      setSourceVideoUrl(null);
+      setVideoUrl(null);
     }
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0] || null;
-    if (f && !f.type.startsWith("video/")) {
-      setError("Please select a valid video file.");
-      return;
-    }
-    processFile(f);
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files?.[0] || null;
-    if (!f) return;
-    if (!f.type.startsWith("video/")) {
-      setError("Please drop a valid video file.");
-      return;
+    if (f && f.type.startsWith("video/")) {
+      processFile(f);
     }
-    processFile(f);
   };
 
-  // -----------------------------------------------------------
-  // Backend call: /detect_video  (offline processing)
-  // -----------------------------------------------------------
-  const handleStartDetection = async () => {
+  // Convert video to browser-compatible format
+  const convertVideo = async (jid: string): Promise<string | null> => {
+    try {
+      setIsConverting(true);
+      const res = await fetch(`${apiBaseUrl}/convert_video/${jid}`, {
+        method: "POST",
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.converted_url) {
+          return `${apiBaseUrl}${data.converted_url}?t=${Date.now()}`;
+        }
+      }
+    } catch (err) {
+      console.warn("[VideoDetection] Conversion error:", err);
+    } finally {
+      setIsConverting(false);
+    }
+    return null;
+  };
+
+  // Async video processing
+  const startAsyncProcessing = async () => {
     if (!file) {
       setError("Please upload a video first.");
       return;
@@ -84,76 +103,242 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
     setIsProcessing(true);
     setError(null);
     setProcessedVideoUrl(null);
+    setProgress(0);
+    setJobStatus("uploading");
 
     try {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch(`${apiBaseUrl}/detect_video`, {
+      const res = await fetch(`${apiBaseUrl}/detect_video_async`, {
         method: "POST",
         body: formData,
       });
 
       if (!res.ok) {
-        throw new Error(`Video detection failed with status ${res.status}`);
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed with status ${res.status}`);
       }
 
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      setProcessedVideoUrl(url);
+      const data = await res.json();
+      const jid = data.job_id;
+
+      setJobId(jid);
+      setJobStatus("queued");
+
+      // Start polling
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const sres = await fetch(`${apiBaseUrl}/detect_video_status/${jid}`);
+          if (!sres.ok) throw new Error("Status check failed");
+          
+          const sdata = await sres.json();
+          setJobStatus(sdata.status);
+          setProgress(sdata.progress ?? null);
+          setEtaSeconds(sdata.eta_seconds ?? null);
+
+          if (sdata.status === "done") {
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+
+            // Try to convert video to browser-compatible format
+            let finalVideoUrl = await convertVideo(jid);
+            
+            if (!finalVideoUrl) {
+              // Fallback to stream endpoint
+              finalVideoUrl = `${apiBaseUrl}/stream_video/${jid}?t=${Date.now()}`;
+            }
+
+            setProcessedVideoUrl(finalVideoUrl);
+            setIsProcessing(false);
+            setIsVideoLoading(true);
+          }
+
+          if (sdata.status === "failed") {
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            setError(sdata.error || "Processing failed");
+            setIsProcessing(false);
+          }
+        } catch (err) {
+          console.error("[VideoDetection] Polling error:", err);
+        }
+      }, 1000);
     } catch (err: any) {
-      console.error("Video detection error:", err);
       setError(err?.message || "Video detection failed.");
-    } finally {
       setIsProcessing(false);
     }
   };
 
-  // -----------------------------------------------------------
-  // Playback controls (play/pause/stop both videos in sync)
-  // -----------------------------------------------------------
-  const handlePlay = () => {
-    const src = sourceVideoRef.current;
-    const out = processedVideoRef.current;
+  // Realtime frame-by-frame processing
+  const processFrame = useCallback(async () => {
+    if (!processingRef.current || !videoRef.current || !canvasRef.current) return;
 
-    if (!src) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
 
-    // keep processed video roughly in sync with source
-    if (out && processedVideoUrl) {
-      out.currentTime = src.currentTime;
-      void out.play();
+    if (!ctx || video.paused || video.ended) {
+      processingRef.current = false;
+      setIsProcessing(false);
+      return;
     }
 
-    void src.play();
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+
+    try {
+      const blob = await new Promise<Blob>((resolve) => {
+        canvas.toBlob((b) => resolve(b!), "image/jpeg", 0.8);
+      });
+
+      const formData = new FormData();
+      formData.append("file", blob, "frame.jpg");
+
+      const startTime = performance.now();
+      const res = await fetch(`${apiBaseUrl}/detect`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error(`Request failed`);
+
+      const data: DetectResponse = await res.json();
+      const endTime = performance.now();
+
+      const frameTime = endTime - startTime;
+      fpsHistoryRef.current.push(1000 / frameTime);
+      if (fpsHistoryRef.current.length > 10) fpsHistoryRef.current.shift();
+      const avgFps = fpsHistoryRef.current.reduce((a, b) => a + b, 0) / fpsHistoryRef.current.length;
+      setCurrentFps(avgFps);
+      setDetectionCount(data.num_detections);
+
+      ctx.lineWidth = 3;
+      data.detections.forEach((det) => {
+        const hue = (det.cls_id * 67) % 360;
+        ctx.strokeStyle = `hsl(${hue}, 80%, 55%)`;
+        ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
+
+        const width = det.x2 - det.x1;
+        const height = det.y2 - det.y1;
+        ctx.strokeRect(det.x1, det.y1, width, height);
+
+        const label = `${det.label ?? det.cls_id} ${det.score.toFixed(2)}`;
+        ctx.font = "bold 14px JetBrains Mono, monospace";
+        const textMetrics = ctx.measureText(label);
+        const textW = textMetrics.width + 12;
+        const textH = 22;
+        const boxY = Math.max(0, det.y1 - textH - 4);
+        ctx.fillRect(det.x1, boxY, textW, textH);
+        ctx.fillStyle = "#000000";
+        ctx.fillText(label, det.x1 + 6, boxY + textH - 6);
+      });
+    } catch (err) {
+      console.error("Frame processing error:", err);
+    }
+
+    if (processingRef.current) {
+      requestAnimationFrame(processFrame);
+    }
+  }, [apiBaseUrl]);
+
+  const handlePlay = () => {
+    if (!videoRef.current) return;
+    videoRef.current.play();
     setIsPlaying(true);
   };
 
   const handlePause = () => {
-    const src = sourceVideoRef.current;
-    const out = processedVideoRef.current;
-
-    src && src.pause();
-    out && out.pause();
+    if (!videoRef.current) return;
+    videoRef.current.pause();
     setIsPlaying(false);
   };
 
   const handleStop = () => {
-    const src = sourceVideoRef.current;
-    const out = processedVideoRef.current;
-
-    if (src) {
-      src.pause();
-      src.currentTime = 0;
-    }
-    if (out) {
-      out.pause();
-      out.currentTime = 0;
-    }
-
+    if (!videoRef.current) return;
+    videoRef.current.pause();
+    videoRef.current.currentTime = 0;
     setIsPlaying(false);
+    processingRef.current = false;
+    setIsProcessing(false);
   };
 
-  // -----------------------------------------------------------
+  const startRealtimeProcessing = () => {
+    processingRef.current = true;
+    setIsProcessing(true);
+    fpsHistoryRef.current = [];
+    processFrame();
+  };
+
+  const stopRealtimeProcessing = () => {
+    processingRef.current = false;
+    setIsProcessing(false);
+  };
+
+  const handleStartDetection = () => {
+    if (processingMode === "async") {
+      startAsyncProcessing();
+    } else {
+      if (isProcessing) {
+        stopRealtimeProcessing();
+      } else {
+        startRealtimeProcessing();
+      }
+    }
+  };
+
+  const tryAlternativeSource = async (type: 'stream' | 'direct' | 'converted') => {
+    if (!jobId) return;
+    
+    let newUrl = '';
+    switch (type) {
+      case 'stream':
+        newUrl = `${apiBaseUrl}/stream_video/${jobId}?t=${Date.now()}`;
+        break;
+      case 'direct':
+        newUrl = `${apiBaseUrl}/processed/${jobId}?t=${Date.now()}`;
+        break;
+      case 'converted':
+        const convertedUrl = await convertVideo(jobId);
+        if (convertedUrl) newUrl = convertedUrl;
+        break;
+    }
+    
+    if (newUrl) {
+      setProcessedVideoUrl(newUrl);
+      setIsVideoLoading(true);
+    }
+  };
+
+  const formatEta = (seconds: number | null) => {
+    if (seconds === null) return "";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const minutes = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return `${minutes}m ${secs}s`;
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "queued": case "uploading": return "text-warning";
+      case "processing": return "text-info";
+      case "done": return "text-success";
+      case "failed": return "text-destructive";
+      default: return "text-muted-foreground";
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      processingRef.current = false;
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -189,51 +374,123 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
             <div className="flex items-center gap-2 px-4 py-2 bg-secondary rounded-lg">
               <Video className="w-4 h-4 text-primary" />
               <span className="text-sm text-foreground">{file.name}</span>
+              <span className="text-xs text-muted-foreground">
+                ({Math.round(file.size / 1024 / 1024)} MB)
+              </span>
             </div>
           )}
         </div>
       </div>
 
-      {/* Controls */}
-      {sourceVideoUrl && (
+      {/* Mode Selection */}
+      {videoUrl && (
+        <div className="flex gap-2 p-1 bg-secondary rounded-lg w-fit">
+          <button
+            onClick={() => setProcessingMode("async")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              processingMode === "async"
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Full Video Processing
+          </button>
+          <button
+            onClick={() => setProcessingMode("realtime")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              processingMode === "realtime"
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Real-time Detection
+          </button>
+        </div>
+      )}
+
+      {/* Job Status for Async Mode */}
+      {processingMode === "async" && jobStatus && (
+        <div className="flex items-center justify-between p-3 glass-panel rounded-lg">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">Status:</span>
+            <span className={`text-sm font-semibold ${getStatusColor(jobStatus)}`}>
+              {jobStatus.toUpperCase()}
+            </span>
+            {isConverting && (
+              <span className="text-xs text-info animate-pulse ml-2">Converting for browser...</span>
+            )}
+          </div>
+          {jobStatus === "done" && (
+            <Button
+              onClick={() => tryAlternativeSource('converted')}
+              size="sm"
+              variant="ghost"
+              className="h-8"
+            >
+              <RefreshCw className="w-3 h-3 mr-1" /> Retry
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Progress Bar for Async Mode */}
+      {processingMode === "async" && isProcessing && progress !== null && (
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm font-medium">
+              Processing: {Math.round(progress)}%
+            </span>
+            {etaSeconds !== null && (
+              <span className="text-sm text-muted-foreground">
+                ETA: {formatEta(etaSeconds)}
+              </span>
+            )}
+          </div>
+          <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-primary h-full transition-all duration-300"
+              style={{ width: `${Math.min(progress, 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Video Controls */}
+      {videoUrl && (
         <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={handlePlay}
-            disabled={isPlaying || isProcessing}
-            variant="outline"
-            size="sm"
-          >
-            <Play className="w-4 h-4" />
-            Play
-          </Button>
-          <Button
-            onClick={handlePause}
-            disabled={!isPlaying}
-            variant="outline"
-            size="sm"
-          >
-            <Pause className="w-4 h-4" />
-            Pause
-          </Button>
-          <Button onClick={handleStop} variant="outline" size="sm">
-            <Square className="w-4 h-4" />
-            Stop
-          </Button>
-
+          {processingMode === "realtime" && (
+            <>
+              <Button onClick={handlePlay} disabled={isPlaying} variant="outline" size="sm">
+                <Play className="w-4 h-4 mr-1" />
+                Play
+              </Button>
+              <Button onClick={handlePause} disabled={!isPlaying} variant="outline" size="sm">
+                <Pause className="w-4 h-4 mr-1" />
+                Pause
+              </Button>
+              <Button onClick={handleStop} variant="outline" size="sm">
+                <Square className="w-4 h-4 mr-1" />
+                Stop
+              </Button>
+            </>
+          )}
           <div className="flex-1" />
-
           <Button
             onClick={handleStartDetection}
-            variant="glow"
+            disabled={isProcessing && processingMode === "async"}
+            variant={isProcessing && processingMode === "realtime" ? "destructive" : "glow"}
             size="sm"
-            disabled={isProcessing || !file}
           >
-            {isProcessing ? "Processing…" : "Start Detection"}
+            {isProcessing
+              ? processingMode === "realtime"
+                ? "Stop Detection"
+                : "Processing..."
+              : "Start Detection"}
           </Button>
         </div>
       )}
 
-      {/* Error */}
+      {/* Error Message */}
       {error && (
         <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
           <AlertCircle className="w-4 h-4 text-destructive" />
@@ -241,10 +498,10 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
         </div>
       )}
 
-      {/* Video Panels */}
-      {sourceVideoUrl && (
+      {/* Video Display */}
+      {videoUrl && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Source video */}
+          {/* Source Video */}
           <div className="glass-panel p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold flex items-center gap-2">
@@ -255,53 +512,137 @@ export const VideoDetection = ({ apiBaseUrl }: VideoDetectionProps) => {
             </div>
             <div className="canvas-container">
               <video
-                ref={sourceVideoRef}
-                src={sourceVideoUrl}
+                ref={videoRef}
+                src={videoUrl}
                 className="w-full h-full object-contain"
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
-                onEnded={() => setIsPlaying(false)}
+                onEnded={() => {
+                  setIsPlaying(false);
+                  processingRef.current = false;
+                  setIsProcessing(false);
+                }}
                 muted
-                controls={false}
+                controls={processingMode === "async"}
               />
             </div>
           </div>
 
-          {/* Processed video */}
+          {/* Detection Output */}
           <div className="glass-panel p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold flex items-center gap-2">
                 <Gauge className="w-4 h-4 text-primary" />
                 Detection Output
               </h3>
-              {processedVideoUrl && !isProcessing && (
-                <span className="fps-badge">Ready</span>
+              {processingMode === "realtime" && isProcessing && (
+                <div className="flex items-center gap-3">
+                  <span className="fps-badge">{currentFps.toFixed(1)} FPS</span>
+                  <span className="text-xs text-muted-foreground">{detectionCount} objects</span>
+                </div>
               )}
-              {isProcessing && (
-                <span className="fps-badge">Processing…</span>
+              {processingMode === "async" && jobStatus === "done" && !isVideoLoading && (
+                <div className="pulse-dot" />
               )}
             </div>
+
             <div className="canvas-container relative">
-              {processedVideoUrl && !isProcessing ? (
-                <video
-                  ref={processedVideoRef}
-                  src={processedVideoUrl}
-                  className="w-full h-full object-contain"
-                  muted
-                  controls
-                />
+              {processingMode === "realtime" ? (
+                <>
+                  <canvas ref={canvasRef} className="w-full h-full object-contain" />
+                  {!isProcessing && (
+                    <div className="canvas-overlay">
+                      <p className="text-sm text-muted-foreground">Start detection to see results</p>
+                    </div>
+                  )}
+                </>
               ) : (
                 <>
-                  <div className="canvas-overlay">
-                    <p className="text-sm text-muted-foreground">
-                      {isProcessing
-                        ? "Processing video… this may take a moment."
-                        : "Start detection to see results"}
-                    </p>
-                  </div>
+                  {jobStatus === "done" && processedVideoUrl ? (
+                    <>
+                      {isVideoLoading && (
+                        <div className="absolute inset-0 bg-background/80 flex items-center justify-center z-10 rounded-lg">
+                          <div className="text-center">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-2" />
+                            <p className="text-sm text-muted-foreground">Loading video...</p>
+                          </div>
+                        </div>
+                      )}
+                      <video
+                        ref={processedVideoRef}
+                        key={processedVideoUrl}
+                        src={processedVideoUrl}
+                        className="w-full h-full object-contain"
+                        controls
+                        preload="auto"
+                        playsInline
+                        onLoadedData={() => {
+                          setIsVideoLoading(false);
+                          setError(null);
+                        }}
+                        onCanPlay={() => setIsVideoLoading(false)}
+                        onError={() => {
+                          setIsVideoLoading(false);
+                          setError("Video playback failed. Try alternative sources below.");
+                        }}
+                      />
+                      {/* Alternative source buttons */}
+                      <div className="absolute bottom-2 right-2 flex gap-1">
+                        <button
+                          onClick={() => tryAlternativeSource('stream')}
+                          className="bg-primary/80 hover:bg-primary text-primary-foreground px-2 py-1 rounded text-xs"
+                        >
+                          Stream
+                        </button>
+                        <button
+                          onClick={() => tryAlternativeSource('direct')}
+                          className="bg-secondary hover:bg-secondary/80 text-secondary-foreground px-2 py-1 rounded text-xs"
+                        >
+                          Direct
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="canvas-overlay">
+                      {isProcessing ? (
+                        <div className="text-center">
+                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-2" />
+                          <p className="text-sm text-muted-foreground">Processing video...</p>
+                          {progress !== null && (
+                            <p className="text-xs text-muted-foreground mt-1">{Math.round(progress)}% complete</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">Start detection to process video</p>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
+
+            {/* Quick actions for async mode */}
+            {processingMode === "async" && jobStatus === "done" && jobId && (
+              <div className="mt-3 flex gap-2 flex-wrap">
+                <a
+                  href={`${apiBaseUrl}/processed/${jobId}`}
+                  download={`processed_${jobId}.mp4`}
+                  className="inline-flex items-center gap-1 text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
+                >
+                  <Download className="w-3 h-3" />
+                  Download
+                </a>
+                <a
+                  href={`${apiBaseUrl}/test_video/${jobId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs bg-secondary text-secondary-foreground px-3 py-1.5 rounded-lg hover:bg-secondary/80 transition-colors"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Test Page
+                </a>
+              </div>
+            )}
           </div>
         </div>
       )}
