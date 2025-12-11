@@ -113,48 +113,86 @@ class VideoEngine:
             cv2.destroyAllWindows()
 
     # ----------------------------------------------------------------------
-    def _draw_detections(self, frame_bgr: np.ndarray, detections: List[Detection]) -> np.ndarray:
-        out = frame_bgr.copy()
-        h, w = out.shape[:2]
+def _draw_detections(self, frame_bgr: np.ndarray, detections: List[Detection]) -> np.ndarray:
+    """Draw detections with thin, clean boxes and readable labels."""
+    out = frame_bgr.copy()
+    h, w = out.shape[:2]
 
-        for det in detections:
-            x1, y1, x2, y2 = float(det.x1), float(det.y1), float(det.x2), float(det.y2)
+    for det in detections:
+        x1, y1, x2, y2 = float(det.x1), float(det.y1), float(det.x2), float(det.y2)
 
-            # Normalize coordinates if in [0,1]
-            if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
-                x1 *= w
-                x2 *= w
-                y1 *= h
-                y2 *= h
+        # Normalize coordinates if in [0,1]
+        if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
+            x1 *= w
+            x2 *= w
+            y1 *= h
+            y2 *= h
 
-            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            x1 = max(0, min(x1, w - 1))
-            x2 = max(0, min(x2, w - 1))
-            y1 = max(0, min(y1, h - 1))
-            y2 = max(0, min(y2, h - 1))
+        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h - 1))
 
-            if x2 <= x1 or y2 <= y1:
-                continue
-            if (x2 - x1) < 5 or (y2 - y1) < 5:
-                continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if (x2 - x1) < 5 or (y2 - y1) < 5:
+            continue
 
-            cls_name = self._get_class_name(det.cls)
-            score = float(det.score)
-            color = self._color_from_id(int(det.cls))
+        cls_name = self._get_class_name(det.cls)
+        score = float(det.score)
+        color = self._color_from_id(int(det.cls))
 
-            cv2.rectangle(out, (x1, y1), (x2, y2), color, 3)
+        # 1. THIN BOUNDING BOX (thickness=1 instead of 3)
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, thickness=1)
+        
+        # 2. BETTER LABEL WITH WHITE TEXT
+        label = f"{cls_name} {score:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5  # Good readable size
+        thickness = 1
+        
+        # Calculate text size
+        (text_width, text_height), baseline = cv2.getTextSize(
+            label, font, font_scale, thickness
+        )
+        
+        # Label background position
+        label_bg_y1 = max(0, y1 - text_height - 6)
+        label_bg_y2 = label_bg_y1 + text_height + 4
+        label_bg_x2 = x1 + text_width + 6
+        
+        # Draw solid background
+        cv2.rectangle(
+            out,
+            (x1, label_bg_y1),
+            (label_bg_x2, label_bg_y2),
+            color,
+            thickness=-1  # Filled rectangle
+        )
+        
+        # Add white border to label
+        cv2.rectangle(
+            out,
+            (x1, label_bg_y1),
+            (label_bg_x2, label_bg_y2),
+            (255, 255, 255),  # White border
+            thickness=1
+        )
+        
+        # 3. WHITE TEXT (much better contrast than black)
+        cv2.putText(
+            out,
+            label,
+            (x1 + 3, label_bg_y1 + text_height + 1),
+            font,
+            font_scale,
+            (255, 255, 255),  # White text
+            thickness=thickness,
+            lineType=cv2.LINE_AA  # Smooth edges
+        )
 
-            label = f"{cls_name} {score:.2f}"
-            ((tw, th), _) = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
-                                            self.cfg.font_scale, 1)
-            cy1 = max(0, y1 - th - 4)
-
-            cv2.rectangle(out, (x1, cy1), (x1 + tw + 4, cy1 + th + 4), color, -1)
-            cv2.putText(out, label, (x1 + 2, cy1 + th + 2),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        self.cfg.font_scale, (0, 0, 0), 1, cv2.LINE_AA)
-
-        return out
+    return out
 
     # ----------------------------------------------------------------------
     def _get_class_name(self, cls_id: int) -> str:

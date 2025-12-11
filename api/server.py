@@ -282,6 +282,10 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        # Store initial fps so frontend can read it during processing
+        with JOBS_LOCK:
+            JOBS[job_id]["fps"] = fps
+
 
         # CRITICAL FIX: Use WebM format (vp80 codec)
         # Replace .mp4 with .webm extension
@@ -326,6 +330,13 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
                 break
 
             detections = detector(frame)
+
+            # Update detection count in job metadata so UI can show live numbers
+            try:
+                with JOBS_LOCK:
+                    JOBS[job_id]["detection_count"] = len(detections)
+            except Exception:
+                pass
 
             for d in detections:
                 cls_id = int(d.cls)
@@ -428,6 +439,7 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
             JOBS[job_id]["output_path"] = str(webm_output)  # WebM yolunu kaydet
             JOBS[job_id]["file_size"] = file_size
             JOBS[job_id]["format"] = "webm" if 'webm' in webm_output else "mp4"
+            JOBS[job_id]["fps"] = fps
 
     except Exception as e:
         with JOBS_LOCK:
@@ -517,6 +529,8 @@ def detect_video_status(job_id: str):
             "progress": job.get("progress", 0.0),
             "eta_seconds": job.get("eta_seconds"),
             "error": job.get("error"),
+            "detection_count": job.get("detection_count", 0),
+            "fps": job.get("fps", 30),
             "download_url": (f"/processed/{job_id}" if job.get("status") == "done" else None),
         }
         

@@ -39,4 +39,5 @@ training/logs/*/events.out.tfevents.*  # TensorBoard event dosyaları çok büy�
 Thumbs.db
 
 *.mp4
+*.webm
 test_video_engine.py
