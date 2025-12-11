@@ -6,6 +6,7 @@ export type BBox = {
   score: number;
   cls_id: number;
   label?: string | null;
+  track_id?: number | null;
 };
 
 export type DetectResponse = {

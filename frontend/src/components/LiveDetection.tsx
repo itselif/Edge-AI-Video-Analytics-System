@@ -27,6 +27,7 @@ export const LiveDetection = ({ apiBaseUrl }: LiveDetectionProps) => {
   const processingRef = useRef<boolean>(false);
   const fpsHistoryRef = useRef<number[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const lastDetectionsRef = useRef<DetectResponse["detections"]>([]);
 
   // Get available camera devices
   useEffect(() => {
@@ -164,36 +165,8 @@ export const LiveDetection = ({ apiBaseUrl }: LiveDetectionProps) => {
       setCurrentFps(avgFps);
       setDetectionCount(data.num_detections);
 
-      // Clear and draw detections
-      ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(sourceEl as CanvasImageSource, 0, 0, width, height);
-      
-      // Draw detection boxes
-      ctx.lineWidth = 3;
-      data.detections.forEach((det) => {
-        const hue = (det.cls_id * 67) % 360;
-        ctx.strokeStyle = `hsl(${hue}, 80%, 55%)`;
-        ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
-
-        const boxWidth = det.x2 - det.x1;
-        const boxHeight = det.y2 - det.y1;
-        ctx.strokeRect(det.x1, det.y1, boxWidth, boxHeight);
-
-        // Draw label
-        const label = `${det.label ?? det.cls_id} ${det.score.toFixed(2)}`;
-        ctx.font = "bold 16px Arial, sans-serif";
-        const textMetrics = ctx.measureText(label);
-        const textWidth = textMetrics.width + 12;
-        const textHeight = 24;
-        const boxY = Math.max(0, det.y1 - textHeight - 4);
-        
-        // Label background
-        ctx.fillRect(det.x1, boxY, textWidth, textHeight);
-        
-        // Label text
-        ctx.fillStyle = "#FFFFFF";
-        ctx.fillText(label, det.x1 + 6, boxY + textHeight - 6);
-      });
+      // Store latest detections for continuous rendering
+      lastDetectionsRef.current = data.detections;
 
     } catch (err) {
       console.error("Frame processing error:", err);
@@ -203,6 +176,93 @@ export const LiveDetection = ({ apiBaseUrl }: LiveDetectionProps) => {
       setTimeout(() => requestAnimationFrame(processFrame), 100);
     }
   }, [apiBaseUrl, sourceType]);
+
+  // Continuous rendering loop — shows cached detections even between requests
+  useEffect(() => {
+    if (!isProcessing || !canvasRef.current) return;
+
+    let rafId: number;
+    
+    const renderLoop = () => {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (!canvas || !ctx) {
+        rafId = requestAnimationFrame(renderLoop);
+        return;
+      }
+
+      const sourceEl = sourceType === "camera" ? videoRef.current : imgRef.current;
+      if (!sourceEl) {
+        rafId = requestAnimationFrame(renderLoop);
+        return;
+      }
+
+      // Get proper dimensions
+      let width = canvas.width;
+      let height = canvas.height;
+      
+      if (sourceType === "camera") {
+        const video = videoRef.current;
+        if (video && video.readyState >= 2) {
+          width = video.videoWidth;
+          height = video.videoHeight;
+        }
+      } else {
+        const img = imgRef.current;
+        if (img && img.naturalWidth) {
+          width = img.naturalWidth;
+          height = img.naturalHeight;
+        }
+      }
+
+      // Update canvas size if needed
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      // Draw video frame
+      try {
+        ctx.drawImage(sourceEl as CanvasImageSource, 0, 0, width, height);
+      } catch (e) {
+        // Silently fail, will retry next frame
+      }
+
+      // Draw cached detections continuously
+      if (lastDetectionsRef.current && lastDetectionsRef.current.length > 0) {
+        ctx.lineWidth = 3;
+        ctx.font = "bold 16px Arial, sans-serif";
+
+        lastDetectionsRef.current.forEach((det) => {
+          const hue = (det.cls_id * 67) % 360;
+          ctx.strokeStyle = `hsl(${hue}, 80%, 55%)`;
+          ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
+
+          const boxWidth = det.x2 - det.x1;
+          const boxHeight = det.y2 - det.y1;
+          ctx.strokeRect(det.x1, det.y1, boxWidth, boxHeight);
+
+          const label = `${det.label ?? det.cls_id} ${det.score.toFixed(2)}`;
+          const textMetrics = ctx.measureText(label);
+          const textWidth = textMetrics.width + 12;
+          const textHeight = 24;
+          const boxY = Math.max(0, det.y1 - textHeight - 4);
+
+          ctx.fillRect(det.x1, boxY, textWidth, textHeight);
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText(label, det.x1 + 6, boxY + textHeight - 6);
+        });
+      }
+
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    rafId = requestAnimationFrame(renderLoop);
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [isProcessing, sourceType]);
 
   const handleConnect = () => {
     setError(null);

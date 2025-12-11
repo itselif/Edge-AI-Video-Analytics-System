@@ -10,6 +10,7 @@ class BBox(BaseModel):
     score: float
     cls_id: int
     label: Optional[str] = None
+    track_id: Optional[int] = None
 
 
 class DetectResponse(BaseModel):
