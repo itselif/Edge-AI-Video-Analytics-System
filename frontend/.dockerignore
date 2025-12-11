@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+.vite
+.next
+.env
+.env.local
+.DS_Store
+.git
+.gitignore
+npm-debug.log
+yarn-error.log
+.eslintcache
+.prettierignore
+README.md

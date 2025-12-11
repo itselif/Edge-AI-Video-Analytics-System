@@ -1,0 +1,77 @@
+services:
+  # ============================================================================
+  # FastAPI Backend - GPU-accelerated object detection
+  # ============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: ./api/docker/Dockerfile
+    container_name: edge-ai-backend
+    restart: unless-stopped
+    
+    # GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    ports:
+      - "8000:8000"
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+      - MODEL_BACKEND=onnx
+      - ONNX_PATH=/app/models/model.onnx
+    
+    volumes:
+      # Mount models directory for easy updates
+      - ./models:/app/models
+      # Mount logs directory
+      - ./logs:/app/logs
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    networks:
+      - edge-ai-network
+
+  # ============================================================================
+  # Frontend - React/Vite web application
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile  # İhtiyaca göre Dockerfile oluşturacağız
+    container_name: edge-ai-frontend
+    restart: unless-stopped
+    
+    ports:
+      - "5173:5173"
+    
+    environment:
+      - VITE_API_URL=http://backend:8000
+      - NODE_ENV=production
+    
+    depends_on:
+      backend:
+        condition: service_healthy
+    
+    networks:
+      - edge-ai-network
+
+networks:
+  edge-ai-network:
+    driver: bridge
+
+volumes:
+  # Optional: Persistent volumes for models and logs
+  models:
+  logs:
