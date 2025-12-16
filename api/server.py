@@ -20,7 +20,6 @@ import subprocess
 import cv2
 
 from inference.detector import Detector, Detection
-from inference.tracker import MultiObjectTracker, Track
 from monitoring.logger import LatencyMeter, JsonLogger, get_gpu_stats
 from api.schemas import (
     HealthResponse,
@@ -64,9 +63,6 @@ EVENT_LOGGER = JsonLogger(str(LOG_DIR / "api_events.jsonl"))
 # Detector object
 detector: Optional[Detector] = None
 
-# Tracker object for live detection
-tracker: Optional[MultiObjectTracker] = None
-
 # Simple job store for async video processing
 JOBS: dict = {}
 JOBS_LOCK = threading.Lock()
@@ -75,7 +71,7 @@ JOBS_LOCK = threading.Lock()
 @app.on_event("startup")
 def startup_event() -> None:
     """Initialize model on service startup."""
-    global detector, tracker
+    global detector
 
     detector = Detector(
         backend=DEFAULT_BACKEND,
@@ -86,16 +82,8 @@ def startup_event() -> None:
         device="cuda",
         class_names=COCO_5CLS,
     )
-    
-    # Initialize tracker for live detection
-    tracker = MultiObjectTracker(
-        tracker_type="IOU_CSRT",
-        max_lost=30,
-        iou_thres=0.5,
-    )
 
     print(f"[API] Loaded detector backend={DEFAULT_BACKEND}, model={DEFAULT_MODEL_ONNX}")
-    print(f"[API] Loaded tracker for live detection")
     print(f"[API] Processed videos directory: {PROCESSED_DIR}")
 
 
@@ -117,61 +105,36 @@ def health() -> HealthResponse:
     )
 
 
-def _detections_to_bboxes(det_list: List[Detection], tracks: Optional[List[Track]] = None) -> List[BBox]:
-    """Convert internal Detection objects to API BBox schema with optional track IDs."""
+def _detections_to_bboxes(det_list: List[Detection]) -> List[BBox]:
+    """Convert internal Detection objects to API BBox schema."""
     boxes: List[BBox] = []
 
-    if tracks is None:
-        # No tracking, just convert detections
-        for d in det_list:
-            cls_id = int(d.cls)
-            label = None
+    for d in det_list:
+        cls_id = int(d.cls)
+        label = None
 
-            if detector and detector.class_names:
-                if 0 <= cls_id < len(detector.class_names):
-                    label = detector.class_names[cls_id]
+        if detector and detector.class_names:
+            if 0 <= cls_id < len(detector.class_names):
+                label = detector.class_names[cls_id]
 
-            boxes.append(
-                BBox(
-                    x1=float(d.x1),
-                    y1=float(d.y1),
-                    x2=float(d.x2),
-                    y2=float(d.y2),
-                    score=float(d.score),
-                    cls_id=cls_id,
-                    label=label,
-                    track_id=None,
-                )
+        boxes.append(
+            BBox(
+                x1=float(d.x1),
+                y1=float(d.y1),
+                x2=float(d.x2),
+                y2=float(d.y2),
+                score=float(d.score),
+                cls_id=cls_id,
+                label=label,
             )
-    else:
-        # Convert tracked objects
-        for trk in tracks:
-            cls_id = int(trk.cls)
-            label = None
-
-            if detector and detector.class_names:
-                if 0 <= cls_id < len(detector.class_names):
-                    label = detector.class_names[cls_id]
-
-            boxes.append(
-                BBox(
-                    x1=float(trk.bbox[0]),
-                    y1=float(trk.bbox[1]),
-                    x2=float(trk.bbox[2]),
-                    y2=float(trk.bbox[3]),
-                    score=float(trk.score),
-                    cls_id=cls_id,
-                    label=label,
-                    track_id=int(trk.track_id),
-                )
-            )
+        )
 
     return boxes
 
 
 @app.post("/detect", response_model=DetectResponse)
 async def detect(file: UploadFile = File(...)) -> DetectResponse:
-    """Run object detection on a single image (live stream frames)."""
+    """Run object detection on a single image."""
     if detector is None:
         raise HTTPException(status_code=503, detail="Detector is not initialized")
 
@@ -185,9 +148,7 @@ async def detect(file: UploadFile = File(...)) -> DetectResponse:
 
     METRICS.record_latency(latency_ms)
 
-    # For live detection, skip tracking (each frame is independent)
-    # Just convert detections to bboxes without track_id
-    bboxes = _detections_to_bboxes(det_list, None)
+    bboxes = _detections_to_bboxes(det_list)
 
     EVENT_LOGGER.log(
         "detect",
@@ -306,7 +267,7 @@ async def detect_video(file: UploadFile = File(...)):
             pass
 
 def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
-    """Background worker: process video with tracking and update JOBS progress."""
+    """Background worker: process video and update JOBS progress."""
     try:
         with JOBS_LOCK:
             JOBS[job_id]["status"] = "processing"
@@ -320,17 +281,6 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # Store initial fps so frontend can read it during processing
-        with JOBS_LOCK:
-            JOBS[job_id]["fps"] = fps
-        
-        # Create fresh tracker instance for this video job
-        video_tracker = MultiObjectTracker(
-            tracker_type="IOU_CSRT",
-            max_lost=30,
-            iou_thres=0.5,
-        )
 
 
         # CRITICAL FIX: Use WebM format (vp80 codec)
@@ -376,38 +326,24 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
                 break
 
             detections = detector(frame)
-            
-            # Track detections
-            tracked_objects = video_tracker.update_with_detections(frame, detections)
 
-            # Update detection count in job metadata so UI can show live numbers
-            try:
-                with JOBS_LOCK:
-                    JOBS[job_id]["detection_count"] = len(tracked_objects)
-            except Exception:
-                pass
-
-            for trk in tracked_objects:
-                # Use track info with tracking ID
-                cls_id = int(trk.cls)
-                track_id = int(trk.track_id)
-                # Use track_id for color to ensure consistency across frames
-                color_id = (track_id * 137) % 360
-                color = tuple((int(c) for c in cv2.cvtColor(np.uint8([[[color_id, 255, 255]]]), cv2.COLOR_HSV2BGR)[0][0]))
+            for d in detections:
+                cls_id = int(d.cls)
+                color = class_colors.get(cls_id, default_color)
                 
                 # Draw rectangle
                 cv2.rectangle(
                     frame,
-                    (int(trk.bbox[0]), int(trk.bbox[1])),
-                    (int(trk.bbox[2]), int(trk.bbox[3])),
+                    (int(d.x1), int(d.y1)),
+                    (int(d.x2), int(d.y2)),
                     color,
                     2,
                 )
 
-                # Draw label with track ID
+                # Draw label
                 if detector.class_names and 0 <= cls_id < len(detector.class_names):
                     label = detector.class_names[cls_id]
-                    score_text = f"[ID:{track_id}] {label} {trk.score:.2f}"
+                    score_text = f"{label} {d.score:.2f}"
                     
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     font_scale = 0.6
@@ -420,8 +356,8 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
                     # Draw background
                     cv2.rectangle(
                         frame,
-                        (int(trk.bbox[0]), int(trk.bbox[1]) - text_height - 10),
-                        (int(trk.bbox[0]) + text_width, int(trk.bbox[1])),
+                        (int(d.x1), int(d.y1) - text_height - 10),
+                        (int(d.x1) + text_width, int(d.y1)),
                         color,
                         -1,
                     )
@@ -430,7 +366,7 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
                     cv2.putText(
                         frame,
                         score_text,
-                        (int(trk.bbox[0]), int(trk.bbox[1]) - 5),
+                        (int(d.x1), int(d.y1) - 5),
                         font,
                         font_scale,
                         (255, 255, 255),
@@ -492,7 +428,6 @@ def _process_video_job(job_id: str, input_path: str, output_path: str) -> None:
             JOBS[job_id]["output_path"] = str(webm_output)  # WebM yolunu kaydet
             JOBS[job_id]["file_size"] = file_size
             JOBS[job_id]["format"] = "webm" if 'webm' in webm_output else "mp4"
-            JOBS[job_id]["fps"] = fps
 
     except Exception as e:
         with JOBS_LOCK:
@@ -582,8 +517,6 @@ def detect_video_status(job_id: str):
             "progress": job.get("progress", 0.0),
             "eta_seconds": job.get("eta_seconds"),
             "error": job.get("error"),
-            "detection_count": job.get("detection_count", 0),
-            "fps": job.get("fps", 30),
             "download_url": (f"/processed/{job_id}" if job.get("status") == "done" else None),
         }
         
