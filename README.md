@@ -2,6 +2,12 @@
 
 This project is a complete, end-to-end Edge AI Video Analytics Solution designed for real-time object detection and tracking on resource-constrained devices. It features a flexible **Multi-Backend Inference Engine** that automatically selects the best available execution provider—ranging from pure CPU execution to high-performance GPU acceleration using **NVIDIA TensorRT**.
 
+## 🎬 System Demo
+
+![Edge AI Video Analytics Demo](tests/demo_vid.gif)
+
+---
+
 ## Dataset & Model Information
 
 The model targets traffic and pedestrian analysis scenarios using a specific subset of the **COCO (Common Objects in Context)** dataset.
